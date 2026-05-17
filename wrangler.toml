@@ -3,5 +3,7 @@ main = "src/index.js"
 compatibility_date = "2024-12-16"
 workers_dev = true
 
-# Secrets (set via `wrangler secret put RTT_API_TOKEN --name hire-jbfmac`):
-#   RTT_API_TOKEN : JWT bearer token from api-portal.rtt.io
+# Secrets (set via `wrangler secret put <NAME> --name hire-jbfmac`):
+#   RTT_USERNAME : RTT API username (rttapi_... format) from api-portal.rtt.io
+#   RTT_PASSWORD : RTT API password from api-portal.rtt.io
+# Note: RTT v1 API uses HTTP Basic Auth. The portal JWT is not the API credential.

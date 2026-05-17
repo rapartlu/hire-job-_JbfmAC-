@@ -264,19 +264,20 @@ async function handleApi(request, env) {
     });
   }
 
-  if (!env.RTT_API_TOKEN) {
+  if (!env.RTT_USERNAME || !env.RTT_PASSWORD) {
     return new Response(
-      JSON.stringify({ error: "API token not configured - contact the fleet" }),
+      JSON.stringify({ error: "RTT credentials not configured - contact the fleet" }),
       { status: 503, headers: { "Content-Type": "application/json" } }
     );
   }
 
   const apiUrl = rttUrl(from, to, date, time);
+  const basicAuth = btoa(`${env.RTT_USERNAME}:${env.RTT_PASSWORD}`);
 
   try {
     const resp = await fetch(apiUrl, {
       headers: {
-        Authorization: `Bearer ${env.RTT_API_TOKEN}`,
+        Authorization: `Basic ${basicAuth}`,
         Accept: "application/json",
       },
     });
