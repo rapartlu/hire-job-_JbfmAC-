@@ -1,0 +1,7 @@
+name = "hire-jbfmac"
+main = "src/index.js"
+compatibility_date = "2024-12-16"
+workers_dev = true
+
+# Secrets (set via `wrangler secret put RTT_API_TOKEN --name hire-jbfmac`):
+#   RTT_API_TOKEN : JWT bearer token from api-portal.rtt.io

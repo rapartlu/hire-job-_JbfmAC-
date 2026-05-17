@@ -1,0 +1,1027 @@
+/**
+ * UK Train Times - hire-the-fleet job _JbfmAC-
+ * Serves a live departure board between any two UK stations.
+ * Data: RealTimeTrains (RTT) API via secure server-side proxy.
+ */
+
+// UK stations with CRS codes - Greater London first, then nationwide.
+const STATIONS = [
+  // Greater London - main terminals
+  { name: "London Blackfriars", crs: "BFR" },
+  { name: "London Bridge", crs: "LBG" },
+  { name: "London Cannon Street", crs: "CST" },
+  { name: "London Charing Cross", crs: "CHX" },
+  { name: "London Euston", crs: "EUS" },
+  { name: "London Fenchurch Street", crs: "FST" },
+  { name: "London King's Cross", crs: "KGX" },
+  { name: "London Liverpool Street", crs: "LST" },
+  { name: "London Marylebone", crs: "MYB" },
+  { name: "London Moorgate", crs: "MOG" },
+  { name: "London Paddington", crs: "PAD" },
+  { name: "London St Pancras International", crs: "STP" },
+  { name: "London Victoria", crs: "VIC" },
+  { name: "London Waterloo", crs: "WAT" },
+  // Greater London - zones
+  { name: "Balham", crs: "BAL" },
+  { name: "Barnes", crs: "BNS" },
+  { name: "Beckenham Junction", crs: "BKJ" },
+  { name: "Blackheath", crs: "BKH" },
+  { name: "Brockley", crs: "BCY" },
+  { name: "Bromley North", crs: "BMN" },
+  { name: "Bromley South", crs: "BMS" },
+  { name: "Camden Road", crs: "CMD" },
+  { name: "Canonbury", crs: "CNN" },
+  { name: "Carshalton", crs: "CSH" },
+  { name: "Catford", crs: "CTF" },
+  { name: "Catford Bridge", crs: "CFB" },
+  { name: "Charlton", crs: "CTN" },
+  { name: "Clapham Junction", crs: "CLJ" },
+  { name: "Crystal Palace", crs: "CYP" },
+  { name: "Dalston Junction", crs: "DLJ" },
+  { name: "Dalston Kingsland", crs: "DLK" },
+  { name: "Denmark Hill", crs: "DMK" },
+  { name: "Deptford", crs: "DEP" },
+  { name: "Earlsfield", crs: "EAR" },
+  { name: "East Croydon", crs: "ECR" },
+  { name: "Eltham", crs: "ELW" },
+  { name: "Finchley Road & Frognal", crs: "FNY" },
+  { name: "Forest Hill", crs: "FOH" },
+  { name: "Gipsy Hill", crs: "GPH" },
+  { name: "Gospel Oak", crs: "GPO" },
+  { name: "Greenwich", crs: "GRW" },
+  { name: "Hackney Central", crs: "HKC" },
+  { name: "Hackney Wick", crs: "HKW" },
+  { name: "Hampstead Heath", crs: "HHE" },
+  { name: "Harrow & Wealdstone", crs: "HRW" },
+  { name: "Herne Hill", crs: "HNH" },
+  { name: "Highbury & Islington", crs: "HHY" },
+  { name: "Honor Oak Park", crs: "HPA" },
+  { name: "Kensal Green", crs: "KNL" },
+  { name: "Kensington Olympia", crs: "KEN" },
+  { name: "Kentish Town", crs: "KTH" },
+  { name: "Kew Gardens", crs: "KWG" },
+  { name: "Kingston", crs: "KNG" },
+  { name: "Lewisham", crs: "LEW" },
+  { name: "London Fields", crs: "LOF" },
+  { name: "Loughborough Junction", crs: "LGJ" },
+  { name: "Mitcham Junction", crs: "MIJ" },
+  { name: "Mortlake", crs: "MTL" },
+  { name: "New Cross", crs: "NXG" },
+  { name: "New Cross Gate", crs: "NXG" },
+  { name: "Norbury", crs: "NRB" },
+  { name: "Norwood Junction", crs: "NWD" },
+  { name: "Orpington", crs: "ORP" },
+  { name: "Peckham Rye", crs: "PMR" },
+  { name: "Putney", crs: "PUT" },
+  { name: "Richmond", crs: "RMD" },
+  { name: "Shepherd's Bush", crs: "SBU" },
+  { name: "South Bermondsey", crs: "SBM" },
+  { name: "Streatham", crs: "STE" },
+  { name: "Streatham Common", crs: "SRC" },
+  { name: "Streatham Hill", crs: "SRH" },
+  { name: "Stratford", crs: "SRA" },
+  { name: "Sutton", crs: "SUO" },
+  { name: "Sydenham", crs: "SYD" },
+  { name: "Tooting", crs: "TOO" },
+  { name: "Tulse Hill", crs: "TUH" },
+  { name: "Twickenham", crs: "TWI" },
+  { name: "Wandsworth Common", crs: "WSW" },
+  { name: "Wandsworth Road", crs: "WWR" },
+  { name: "Wandsworth Town", crs: "WNT" },
+  { name: "Watford Junction", crs: "WFJ" },
+  { name: "Wembley Central", crs: "WMB" },
+  { name: "West Croydon", crs: "WCY" },
+  { name: "West Dulwich", crs: "WDL" },
+  { name: "West Norwood", crs: "WNW" },
+  { name: "Wimbledon", crs: "WIM" },
+  { name: "Wimbledon Chase", crs: "WBO" },
+  // Southeast England
+  { name: "Ashford International", crs: "AFK" },
+  { name: "Brighton", crs: "BTN" },
+  { name: "Canterbury East", crs: "CAX" },
+  { name: "Canterbury West", crs: "CBW" },
+  { name: "Chichester", crs: "CCH" },
+  { name: "Crawley", crs: "CRW" },
+  { name: "Dover Priory", crs: "DVP" },
+  { name: "Eastbourne", crs: "EBN" },
+  { name: "Epsom", crs: "EPS" },
+  { name: "Folkestone Central", crs: "FKC" },
+  { name: "Gatwick Airport", crs: "GTW" },
+  { name: "Guildford", crs: "GLD" },
+  { name: "Hastings", crs: "HGS" },
+  { name: "Horsham", crs: "HRH" },
+  { name: "Lewes", crs: "LWS" },
+  { name: "Maidstone East", crs: "MAE" },
+  { name: "Maidstone West", crs: "MAW" },
+  { name: "Margate", crs: "MAR" },
+  { name: "Ramsgate", crs: "RAM" },
+  { name: "Reading", crs: "RDG" },
+  { name: "Reigate", crs: "REI" },
+  { name: "Rochester", crs: "RTR" },
+  { name: "Sevenoaks", crs: "SEV" },
+  { name: "Tonbridge", crs: "TON" },
+  { name: "Tunbridge Wells", crs: "TBW" },
+  { name: "Woking", crs: "WOK" },
+  { name: "Worthing", crs: "WRH" },
+  // South & Southwest
+  { name: "Basingstoke", crs: "BSK" },
+  { name: "Bath Spa", crs: "BTH" },
+  { name: "Bournemouth", crs: "BMH" },
+  { name: "Bristol Parkway", crs: "BPW" },
+  { name: "Bristol Temple Meads", crs: "BRI" },
+  { name: "Cheltenham Spa", crs: "CNM" },
+  { name: "Exeter Central", crs: "EXC" },
+  { name: "Exeter St David's", crs: "EXD" },
+  { name: "Fareham", crs: "FRM" },
+  { name: "Gloucester", crs: "GCR" },
+  { name: "Penzance", crs: "PNZ" },
+  { name: "Plymouth", crs: "PLY" },
+  { name: "Portsmouth & Southsea", crs: "PMS" },
+  { name: "Portsmouth Harbour", crs: "PMH" },
+  { name: "Salisbury", crs: "SAL" },
+  { name: "Southampton Airport Parkway", crs: "SOA" },
+  { name: "Southampton Central", crs: "SOU" },
+  { name: "Swindon", crs: "SWI" },
+  { name: "Taunton", crs: "TAU" },
+  { name: "Truro", crs: "TRU" },
+  { name: "Winchester", crs: "WIN" },
+  // East of England
+  { name: "Cambridge", crs: "CBG" },
+  { name: "Cambridge North", crs: "CMB" },
+  { name: "Chelmsford", crs: "CHM" },
+  { name: "Colchester", crs: "COL" },
+  { name: "Ely", crs: "ELY" },
+  { name: "Ipswich", crs: "IPS" },
+  { name: "Luton Airport Parkway", crs: "LTN" },
+  { name: "Norwich", crs: "NRW" },
+  { name: "Peterborough", crs: "PBR" },
+  { name: "Southend Central", crs: "SOC" },
+  { name: "Southend Victoria", crs: "SOV" },
+  { name: "Stansted Airport", crs: "SSD" },
+  { name: "Stevenage", crs: "SVG" },
+  // Midlands
+  { name: "Birmingham International", crs: "BHI" },
+  { name: "Birmingham Moor Street", crs: "BMO" },
+  { name: "Birmingham New Street", crs: "BHM" },
+  { name: "Birmingham Snow Hill", crs: "BSW" },
+  { name: "Coventry", crs: "COV" },
+  { name: "Derby", crs: "DBY" },
+  { name: "Hereford", crs: "HFD" },
+  { name: "Leicester", crs: "LEI" },
+  { name: "Milton Keynes Central", crs: "MKC" },
+  { name: "Northampton", crs: "NMP" },
+  { name: "Nottingham", crs: "NOT" },
+  { name: "Oxford", crs: "OXF" },
+  { name: "Shrewsbury", crs: "SHR" },
+  { name: "Stoke-on-Trent", crs: "SOT" },
+  { name: "Wolverhampton", crs: "WVH" },
+  { name: "Worcester Foregate Street", crs: "WOF" },
+  { name: "Worcester Shrub Hill", crs: "WOS" },
+  // North of England
+  { name: "Blackpool North", crs: "BPN" },
+  { name: "Bolton", crs: "BON" },
+  { name: "Bradford Forster Square", crs: "BDQ" },
+  { name: "Bradford Interchange", crs: "BDI" },
+  { name: "Carlisle", crs: "CAR" },
+  { name: "Chester", crs: "CTR" },
+  { name: "Crewe", crs: "CRE" },
+  { name: "Doncaster", crs: "DON" },
+  { name: "Durham", crs: "DAM" },
+  { name: "Halifax", crs: "HFX" },
+  { name: "Harrogate", crs: "HGT" },
+  { name: "Huddersfield", crs: "HUD" },
+  { name: "Hull", crs: "HUL" },
+  { name: "Leeds", crs: "LDS" },
+  { name: "Liverpool Central", crs: "LVC" },
+  { name: "Liverpool Lime Street", crs: "LIV" },
+  { name: "Manchester Airport", crs: "MIA" },
+  { name: "Manchester Piccadilly", crs: "MAN" },
+  { name: "Manchester Victoria", crs: "MCV" },
+  { name: "Middlesbrough", crs: "MBR" },
+  { name: "Newcastle", crs: "NCL" },
+  { name: "Preston", crs: "PRE" },
+  { name: "Scarborough", crs: "SCA" },
+  { name: "Sheffield", crs: "SHF" },
+  { name: "Skipton", crs: "SKI" },
+  { name: "Sunderland", crs: "SUN" },
+  { name: "Wakefield Westgate", crs: "WKF" },
+  { name: "Wigan North Western", crs: "WGN" },
+  { name: "York", crs: "YRK" },
+  // Wales
+  { name: "Bangor (Gwynedd)", crs: "BNG" },
+  { name: "Cardiff Central", crs: "CDF" },
+  { name: "Cardiff Queen Street", crs: "CQU" },
+  { name: "Newport (South Wales)", crs: "NWP" },
+  { name: "Swansea", crs: "SWA" },
+  { name: "Wrexham General", crs: "WRX" },
+  // Scotland
+  { name: "Aberdeen", crs: "ABD" },
+  { name: "Dundee", crs: "DEE" },
+  { name: "Edinburgh", crs: "EDB" },
+  { name: "Glasgow Central", crs: "GLC" },
+  { name: "Glasgow Queen Street", crs: "GLQ" },
+  { name: "Inverness", crs: "INV" },
+  { name: "Perth", crs: "PTH" },
+  { name: "Stirling", crs: "STG" },
+];
+
+// Format HHMM string to HH:MM for display
+function fmtTime(t) {
+  if (!t || t.length < 4) return t || "--";
+  return `${t.slice(0, 2)}:${t.slice(2)}`;
+}
+
+// Build RTT API URL for departures from `from` optionally filtered to `to`
+function rttUrl(from, to, date, time) {
+  const base = `https://api.rtt.io/api/v1/json/search/${from.toUpperCase()}`;
+  if (to) {
+    const path = to ? `/to/${to.toUpperCase()}` : "";
+    if (date && time) {
+      const d = date.replace(/-/g, "/");
+      return `${base}${path}/${d}/${time}`;
+    }
+    return `${base}${path}`;
+  }
+  if (date && time) {
+    const d = date.replace(/-/g, "/");
+    return `${base}/${d}/${time}`;
+  }
+  return base;
+}
+
+// Proxy RTT API - keeps the token server-side
+async function handleApi(request, env) {
+  const url = new URL(request.url);
+  const from = url.searchParams.get("from");
+  const to = url.searchParams.get("to");
+  const date = url.searchParams.get("date"); // YYYY-MM-DD
+  const time = url.searchParams.get("time"); // HHMM (4 digits)
+
+  if (!from) {
+    return new Response(JSON.stringify({ error: "Missing 'from' parameter" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  if (!env.RTT_API_TOKEN) {
+    return new Response(
+      JSON.stringify({ error: "API token not configured - contact the fleet" }),
+      { status: 503, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  const apiUrl = rttUrl(from, to, date, time);
+
+  try {
+    const resp = await fetch(apiUrl, {
+      headers: {
+        Authorization: `Bearer ${env.RTT_API_TOKEN}`,
+        Accept: "application/json",
+      },
+    });
+
+    if (!resp.ok) {
+      const body = await resp.text();
+      return new Response(
+        JSON.stringify({ error: `RTT API error ${resp.status}`, detail: body }),
+        { status: resp.status, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    const data = await resp.json();
+
+    // Simplify the response for the frontend
+    const services = (data.services || []).slice(0, 20).map((s) => {
+      const loc = s.locationDetail || {};
+      const dests = (s.destination || []).map((d) => ({
+        name: d.description,
+        crs: d.crs,
+        time: fmtTime(d.publicTime),
+      }));
+      return {
+        uid: s.serviceUid,
+        trainId: s.trainIdentity,
+        operator: s.atocName || s.atocCode || "",
+        scheduledDep: fmtTime(loc.gbttBookedDeparture),
+        realtimeDep: fmtTime(loc.realtimeDeparture || loc.gbttBookedDeparture),
+        scheduledArr: fmtTime(loc.gbttBookedArrival),
+        realtimeArr: fmtTime(loc.realtimeArrival || loc.gbttBookedArrival),
+        platform: loc.platform || "--",
+        cancelled: loc.cancelReasonCode ? true : false,
+        displayAs: loc.displayAs || "",
+        destinations: dests,
+      };
+    });
+
+    return new Response(
+      JSON.stringify({
+        from: data.location?.name || from,
+        fromCrs: from.toUpperCase(),
+        services,
+        generatedAt: data.generatedAt || new Date().toISOString(),
+      }),
+      { headers: { "Content-Type": "application/json" } }
+    );
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ error: "Failed to fetch from RTT", detail: err.message }),
+      { status: 502, headers: { "Content-Type": "application/json" } }
+    );
+  }
+}
+
+// Serve station list as JSON for client-side autocomplete seed
+function handleStations() {
+  return new Response(JSON.stringify(STATIONS), {
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+// HTML page - self-contained with embedded JS and CSS
+function handleHtml() {
+  const stationsJson = JSON.stringify(STATIONS);
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UK Train Times</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --surface2: #242736;
+      --border: #2e3248;
+      --accent: #4f6ef7;
+      --accent-dark: #3a57d9;
+      --text: #e8eaf0;
+      --muted: #8890a4;
+      --green: #34d399;
+      --amber: #f59e0b;
+      --red: #ef4444;
+      --radius: 8px;
+      --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    header svg { flex-shrink: 0; }
+
+    header h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+
+    header span {
+      color: var(--muted);
+      font-size: 0.875rem;
+      margin-left: auto;
+    }
+
+    main {
+      flex: 1;
+      max-width: 860px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 32px 16px 64px;
+    }
+
+    .search-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      margin-bottom: 24px;
+    }
+
+    .search-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    @media (max-width: 600px) {
+      .search-row { grid-template-columns: 1fr; }
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      position: relative;
+    }
+
+    label {
+      font-size: 0.75rem;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+    }
+
+    input[type="text"], input[type="time"], input[type="date"] {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 0.9375rem;
+      padding: 10px 12px;
+      width: 100%;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    input:focus {
+      border-color: var(--accent);
+    }
+
+    .autocomplete-list {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      z-index: 100;
+      max-height: 240px;
+      overflow-y: auto;
+      margin-top: 2px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    }
+
+    .autocomplete-list li {
+      list-style: none;
+      padding: 9px 12px;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.9rem;
+      gap: 8px;
+    }
+
+    .autocomplete-list li:hover,
+    .autocomplete-list li.active {
+      background: var(--surface);
+    }
+
+    .autocomplete-list li .crs-badge {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--muted);
+      font-family: monospace;
+      background: var(--bg);
+      padding: 2px 6px;
+      border-radius: 4px;
+      flex-shrink: 0;
+    }
+
+    .time-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr auto;
+      gap: 12px;
+      align-items: flex-end;
+    }
+
+    @media (max-width: 600px) {
+      .time-row { grid-template-columns: 1fr 1fr; }
+      .time-row button { grid-column: span 2; }
+    }
+
+    button {
+      background: var(--accent);
+      border: none;
+      border-radius: 6px;
+      color: #fff;
+      cursor: pointer;
+      font-family: var(--font);
+      font-size: 0.9375rem;
+      font-weight: 500;
+      padding: 10px 24px;
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+
+    button:hover { background: var(--accent-dark); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .btn-now {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      padding: 10px 12px;
+      font-size: 0.8125rem;
+    }
+
+    .btn-now:hover {
+      background: var(--surface2);
+      color: var(--text);
+    }
+
+    /* Results */
+    .results-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .results-header h2 {
+      font-size: 1rem;
+      font-weight: 600;
+    }
+
+    .results-header .meta {
+      font-size: 0.8125rem;
+      color: var(--muted);
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+
+    th {
+      background: var(--surface);
+      color: var(--muted);
+      font-size: 0.75rem;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 10px 14px;
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    td {
+      padding: 12px 14px;
+      border-top: 1px solid var(--border);
+      vertical-align: middle;
+    }
+
+    tr:nth-child(even) td { background: rgba(255,255,255,0.015); }
+
+    .dep-time {
+      font-variant-numeric: tabular-nums;
+      font-size: 1.125rem;
+      font-weight: 600;
+      line-height: 1;
+    }
+
+    .arr-time {
+      font-variant-numeric: tabular-nums;
+      font-size: 1.125rem;
+      font-weight: 600;
+      line-height: 1;
+    }
+
+    .time-actual {
+      display: block;
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    .time-actual.late { color: var(--amber); }
+    .time-actual.cancelled { color: var(--red); }
+
+    .status-on-time { color: var(--green); font-size: 0.8rem; }
+    .status-late { color: var(--amber); font-size: 0.8rem; }
+    .status-cancelled { color: var(--red); font-size: 0.8rem; }
+
+    .operator { font-size: 0.8125rem; color: var(--muted); }
+
+    .platform {
+      font-size: 0.875rem;
+      font-weight: 500;
+      text-align: center;
+    }
+
+    .dest-list {
+      font-size: 0.875rem;
+      color: var(--text);
+    }
+
+    .empty-state, .error-state, .loading-state {
+      text-align: center;
+      padding: 48px 24px;
+      color: var(--muted);
+    }
+
+    .error-state { color: var(--red); }
+
+    .spinner {
+      display: inline-block;
+      width: 24px;
+      height: 24px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      margin-bottom: 12px;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    footer {
+      text-align: center;
+      padding: 20px;
+      font-size: 0.75rem;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
+    }
+
+    footer a { color: var(--muted); text-decoration: none; }
+    footer a:hover { color: var(--text); }
+  </style>
+</head>
+<body>
+
+<header>
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect x="4" y="3" width="16" height="15" rx="2" stroke="#4f6ef7" stroke-width="1.5"/>
+    <path d="M4 13h16" stroke="#4f6ef7" stroke-width="1.5"/>
+    <path d="M8 18l-2 3M16 18l2 3" stroke="#4f6ef7" stroke-width="1.5" stroke-linecap="round"/>
+    <circle cx="8.5" cy="10" r="1" fill="#4f6ef7"/>
+    <circle cx="15.5" cy="10" r="1" fill="#4f6ef7"/>
+  </svg>
+  <h1>UK Train Times</h1>
+  <span id="clock">--:--</span>
+</header>
+
+<main>
+  <div class="search-card">
+    <div class="search-row">
+      <div class="field" id="from-field">
+        <label for="from-input">From</label>
+        <input
+          type="text"
+          id="from-input"
+          placeholder="Station name or code"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <ul class="autocomplete-list" id="from-list" hidden></ul>
+        <input type="hidden" id="from-crs" />
+      </div>
+      <div class="field" id="to-field">
+        <label for="to-input">To</label>
+        <input
+          type="text"
+          id="to-input"
+          placeholder="Station name or code"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <ul class="autocomplete-list" id="to-list" hidden></ul>
+        <input type="hidden" id="to-crs" />
+      </div>
+    </div>
+    <div class="time-row">
+      <div class="field">
+        <label for="date-input">Date</label>
+        <input type="date" id="date-input" />
+      </div>
+      <div class="field">
+        <label for="time-input">Time</label>
+        <input type="time" id="time-input" />
+      </div>
+      <button class="btn-now" id="btn-now" title="Reset to now">Now</button>
+      <button id="btn-search">Search</button>
+    </div>
+  </div>
+
+  <div id="results"></div>
+</main>
+
+<footer>
+  Built by Fleet &middot; <a href="https://hire.autonomous-fleet.workers.dev" target="_blank">Alpha access</a>
+</footer>
+
+<script>
+  const STATIONS = ${stationsJson};
+
+  // ── Clock ──────────────────────────────────────────────────────────────────
+  function updateClock() {
+    const now = new Date();
+    document.getElementById('clock').textContent =
+      now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  }
+  updateClock();
+  setInterval(updateClock, 10000);
+
+  // ── Date/time defaults ────────────────────────────────────────────────────
+  function setNow() {
+    const now = new Date();
+    const yyyy = now.getFullYear();
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const hh = String(now.getHours()).padStart(2, '0');
+    const min = String(now.getMinutes()).padStart(2, '0');
+    document.getElementById('date-input').value = \`\${yyyy}-\${mm}-\${dd}\`;
+    document.getElementById('time-input').value = \`\${hh}:\${min}\`;
+  }
+  setNow();
+  document.getElementById('btn-now').addEventListener('click', setNow);
+
+  // ── Autocomplete ──────────────────────────────────────────────────────────
+  function setupAutocomplete(inputId, listId, crsHiddenId) {
+    const input = document.getElementById(inputId);
+    const list = document.getElementById(listId);
+    const crsHidden = document.getElementById(crsHiddenId);
+    let activeIdx = -1;
+
+    function match(q) {
+      if (!q) return [];
+      const ql = q.toLowerCase();
+      return STATIONS.filter(s =>
+        s.name.toLowerCase().includes(ql) ||
+        s.crs.toLowerCase().startsWith(ql)
+      ).slice(0, 10);
+    }
+
+    function render(items) {
+      if (!items.length) { list.hidden = true; return; }
+      list.innerHTML = '';
+      activeIdx = -1;
+      items.forEach((item, i) => {
+        const li = document.createElement('li');
+        li.dataset.crs = item.crs;
+        li.dataset.name = item.name;
+        li.innerHTML =
+          \`<span>\${item.name}</span><span class="crs-badge">\${item.crs}</span>\`;
+        li.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          select(item);
+        });
+        list.appendChild(li);
+      });
+      list.hidden = false;
+    }
+
+    function select(item) {
+      input.value = item.name;
+      crsHidden.value = item.crs;
+      list.hidden = true;
+      activeIdx = -1;
+    }
+
+    input.addEventListener('input', () => {
+      crsHidden.value = '';
+      render(match(input.value));
+    });
+
+    input.addEventListener('keydown', (e) => {
+      const items = list.querySelectorAll('li');
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        activeIdx = Math.min(activeIdx + 1, items.length - 1);
+        items.forEach((li, i) => li.classList.toggle('active', i === activeIdx));
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        activeIdx = Math.max(activeIdx - 1, 0);
+        items.forEach((li, i) => li.classList.toggle('active', i === activeIdx));
+      } else if (e.key === 'Enter' && activeIdx >= 0) {
+        e.preventDefault();
+        const active = items[activeIdx];
+        if (active) select({ crs: active.dataset.crs, name: active.dataset.name });
+      } else if (e.key === 'Escape') {
+        list.hidden = true;
+      }
+    });
+
+    input.addEventListener('blur', () => {
+      // Short delay so mousedown fires first
+      setTimeout(() => { list.hidden = true; }, 150);
+
+      // If user typed a 3-letter CRS directly, accept it
+      const v = input.value.trim().toUpperCase();
+      if (!crsHidden.value && v.length === 3) {
+        const match = STATIONS.find(s => s.crs === v);
+        if (match) select(match);
+        else {
+          // Unknown CRS - accept as-is and use uppercase as crs
+          crsHidden.value = v;
+        }
+      }
+    });
+  }
+
+  setupAutocomplete('from-input', 'from-list', 'from-crs');
+  setupAutocomplete('to-input', 'to-list', 'to-crs');
+
+  // ── Search ────────────────────────────────────────────────────────────────
+  const resultsEl = document.getElementById('results');
+
+  async function doSearch() {
+    const fromCrs = document.getElementById('from-crs').value;
+    const toCrs = document.getElementById('to-crs').value;
+    const fromName = document.getElementById('from-input').value.trim();
+    const toName = document.getElementById('to-input').value.trim();
+
+    if (!fromCrs && !fromName) {
+      resultsEl.innerHTML = '<div class="empty-state">Enter a departure station to search.</div>';
+      return;
+    }
+
+    const from = fromCrs || fromName.slice(0, 3).toUpperCase();
+    const to = toCrs || (toName ? toName.slice(0, 3).toUpperCase() : '');
+
+    const dateVal = document.getElementById('date-input').value;
+    const timeVal = document.getElementById('time-input').value.replace(':', '');
+
+    const params = new URLSearchParams({ from });
+    if (to) params.set('to', to);
+    if (dateVal) params.set('date', dateVal);
+    if (timeVal) params.set('time', timeVal);
+
+    resultsEl.innerHTML = \`
+      <div class="loading-state">
+        <div class="spinner"></div>
+        <p>Fetching departures...</p>
+      </div>\`;
+
+    document.getElementById('btn-search').disabled = true;
+
+    try {
+      const resp = await fetch(\`/api/trains?\${params}\`);
+      const data = await resp.json();
+
+      if (!resp.ok || data.error) {
+        resultsEl.innerHTML = \`<div class="error-state">
+          <p>Could not fetch train times: \${data.error || resp.statusText}</p>
+          \${data.detail ? \`<p style="margin-top:8px;font-size:0.8rem;opacity:0.7">\${data.detail}</p>\` : ''}
+        </div>\`;
+        return;
+      }
+
+      renderResults(data, fromName || from, toName || to, dateVal, timeVal);
+    } catch (err) {
+      resultsEl.innerHTML = \`<div class="error-state">Network error: \${err.message}</div>\`;
+    } finally {
+      document.getElementById('btn-search').disabled = false;
+    }
+  }
+
+  function renderResults(data, fromLabel, toLabel, dateVal, timeVal) {
+    if (!data.services || !data.services.length) {
+      resultsEl.innerHTML = \`
+        <div class="results-header">
+          <h2>Departures from \${data.from}</h2>
+          <span class="meta">No services found</span>
+        </div>
+        <div class="empty-state">No trains found for this route at this time.</div>\`;
+      return;
+    }
+
+    const heading = toLabel
+      ? \`\${data.from} → \${toLabel}\`
+      : \`Departures from \${data.from}\`;
+
+    const timeDisplay = formatDisplayTime(dateVal, timeVal);
+
+    const rows = data.services.map(s => {
+      const cancelled = s.cancelled;
+      const depStatus = statusLabel(s.scheduledDep, s.realtimeDep, cancelled);
+      const arrStatus = s.scheduledArr ? statusLabel(s.scheduledArr, s.realtimeArr, cancelled) : null;
+
+      const destText = s.destinations.map(d => d.time ? \`\${d.name} (\${d.time})\` : d.name).join(', ');
+
+      return \`<tr>
+        <td>
+          <div class="dep-time">\${s.realtimeDep || s.scheduledDep}</div>
+          \${depStatus.html}
+        </td>
+        \${toLabel ? \`<td>
+          <div class="arr-time">\${s.realtimeArr || s.scheduledArr || '--'}</div>
+          \${arrStatus ? arrStatus.html : ''}
+        </td>\` : \`<td><div class="dest-list">\${destText || '--'}</div></td>\`}
+        <td class="platform">\${s.platform}</td>
+        <td class="\${depStatus.cls}">\${depStatus.label}</td>
+        <td class="operator">\${s.operator}</td>
+      </tr>\`;
+    }).join('');
+
+    const toCol = toLabel
+      ? '<th>Arrives</th>'
+      : '<th>Destination</th>';
+
+    resultsEl.innerHTML = \`
+      <div class="results-header">
+        <h2>\${heading}</h2>
+        <span class="meta">\${timeDisplay} &middot; \${data.services.length} service\${data.services.length !== 1 ? 's' : ''}</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Departs</th>
+              \${toCol}
+              <th>Plat</th>
+              <th>Status</th>
+              <th>Operator</th>
+            </tr>
+          </thead>
+          <tbody>\${rows}</tbody>
+        </table>
+      </div>\`;
+  }
+
+  function statusLabel(sched, actual, cancelled) {
+    if (cancelled) return { label: 'Cancelled', cls: 'status-cancelled', html: '<span class="time-actual cancelled">Cancelled</span>' };
+    if (!sched || !actual || sched === actual) {
+      return { label: 'On time', cls: 'status-on-time', html: '' };
+    }
+    // Compare as HHMM integers
+    const s = parseInt(sched.replace(':', ''), 10);
+    const a = parseInt(actual.replace(':', ''), 10);
+    const late = a - s;
+    if (late > 0) {
+      return {
+        label: \`+\${late} min\`,
+        cls: 'status-late',
+        html: \`<span class="time-actual late">Exp \${actual}</span>\`,
+      };
+    }
+    return { label: 'On time', cls: 'status-on-time', html: '' };
+  }
+
+  function formatDisplayTime(dateVal, timeVal) {
+    if (!dateVal) return 'Now';
+    try {
+      const d = new Date(\`\${dateVal}T\${timeVal.slice(0,2)}:\${timeVal.slice(2) || '00'}:00\`);
+      return d.toLocaleString('en-GB', {
+        weekday: 'short', day: 'numeric', month: 'short',
+        hour: '2-digit', minute: '2-digit',
+      });
+    } catch { return 'Now'; }
+  }
+
+  document.getElementById('btn-search').addEventListener('click', doSearch);
+
+  // Allow pressing Enter in inputs to trigger search
+  ['from-input', 'to-input', 'date-input', 'time-input'].forEach(id => {
+    document.getElementById(id).addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') doSearch();
+    });
+  });
+</script>
+
+</body>
+</html>`;
+
+  return new Response(html, {
+    headers: { "Content-Type": "text/html; charset=utf-8" },
+  });
+}
+
+// Main fetch handler
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/api/trains") {
+      return handleApi(request, env);
+    }
+
+    if (url.pathname === "/api/stations") {
+      return handleStations();
+    }
+
+    // Everything else serves the HTML page
+    return handleHtml();
+  },
+};
