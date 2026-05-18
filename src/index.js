@@ -443,13 +443,34 @@ function handleHtml() {
 
     .search-row {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1fr auto 1fr;
       gap: 12px;
+      align-items: end;
       margin-bottom: 16px;
     }
 
     @media (max-width: 600px) {
       .search-row { grid-template-columns: 1fr; }
+      .btn-swap { justify-self: center; }
+    }
+
+    .btn-swap {
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 1.1rem;
+      line-height: 1;
+      padding: 10px 10px;
+      transition: background 0.15s, color 0.15s;
+      align-self: flex-end;
+      margin-bottom: 1px;
+    }
+
+    .btn-swap:hover {
+      background: var(--surface2);
+      color: var(--text);
     }
 
     .field {
@@ -725,7 +746,8 @@ function handleHtml() {
     .saved-journey-row {
       display: flex;
       align-items: flex-start;
-      gap: 12px;
+      flex-wrap: wrap;
+      gap: 8px 12px;
       padding: 12px 0;
       border-top: 1px solid var(--border);
     }
@@ -735,10 +757,22 @@ function handleHtml() {
     .saved-route-label {
       font-size: 0.9375rem;
       font-weight: 600;
-      min-width: 180px;
+      min-width: 160px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+
+    @media (max-width: 600px) {
+      .saved-route-label {
+        width: 100%;
+        min-width: unset;
+        white-space: normal;
+      }
+      .saved-times {
+        flex: 1;
+        min-width: 0;
+      }
     }
 
     .saved-times {
@@ -746,6 +780,7 @@ function handleHtml() {
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
+      min-width: 0;
     }
 
     .saved-train-chip {
@@ -838,6 +873,16 @@ function handleHtml() {
 </header>
 
 <main>
+  <div id="saved-panel" style="display:none">
+    <div class="saved-panel">
+      <div class="saved-panel-header">
+        <h2>Saved journeys</h2>
+        <span class="refresh-note" id="saved-refresh-note"></span>
+      </div>
+      <div id="saved-list"></div>
+    </div>
+  </div>
+
   <div class="search-card">
     <div class="search-row">
       <div class="field" id="from-field">
@@ -852,6 +897,7 @@ function handleHtml() {
         <ul class="autocomplete-list" id="from-list" hidden></ul>
         <input type="hidden" id="from-crs" />
       </div>
+      <button class="btn-swap" id="btn-swap" title="Swap stations">&#8644;</button>
       <div class="field" id="to-field">
         <label for="to-input">To</label>
         <input
@@ -876,16 +922,6 @@ function handleHtml() {
       </div>
       <button class="btn-now" id="btn-now" title="Reset to now">Now</button>
       <button id="btn-search">Search</button>
-    </div>
-  </div>
-
-  <div id="saved-panel" style="display:none">
-    <div class="saved-panel">
-      <div class="saved-panel-header">
-        <h2>Saved journeys</h2>
-        <span class="refresh-note" id="saved-refresh-note"></span>
-      </div>
-      <div id="saved-list"></div>
     </div>
   </div>
 
@@ -1180,6 +1216,20 @@ function handleHtml() {
   }
 
   document.getElementById('btn-search').addEventListener('click', doSearch);
+
+  // Swap from/to stations
+  document.getElementById('btn-swap').addEventListener('click', () => {
+    const fromInput = document.getElementById('from-input');
+    const fromCrs = document.getElementById('from-crs');
+    const toInput = document.getElementById('to-input');
+    const toCrs = document.getElementById('to-crs');
+    const tmpName = fromInput.value;
+    const tmpCrs = fromCrs.value;
+    fromInput.value = toInput.value;
+    fromCrs.value = toCrs.value;
+    toInput.value = tmpName;
+    toCrs.value = tmpCrs;
+  });
 
   // Allow pressing Enter in inputs to trigger search
   ['from-input', 'to-input', 'date-input', 'time-input'].forEach(id => {
