@@ -231,31 +231,28 @@ function fmtTime(t) {
   return `${t.slice(0, 2)}:${t.slice(2)}`;
 }
 
-// Build RTT API URL for departures from `from` optionally filtered to `to`
-function rttUrl(from, to, date, time) {
-  const base = `https://api.rtt.io/api/v1/json/search/${from.toUpperCase()}`;
-  if (to) {
-    const path = to ? `/to/${to.toUpperCase()}` : "";
-    if (date && time) {
-      const d = date.replace(/-/g, "/");
-      return `${base}${path}/${d}/${time}`;
-    }
-    return `${base}${path}`;
-  }
-  if (date && time) {
-    const d = date.replace(/-/g, "/");
-    return `${base}/${d}/${time}`;
-  }
-  return base;
+// Extract HH:MM from an ISO datetime string, e.g. "2026-05-18T03:35:00+01:00"
+function fmtIsoTime(iso) {
+  if (!iso) return null;
+  const m = iso.match(/T(\d{2}):(\d{2})/);
+  return m ? `${m[1]}:${m[2]}` : null;
 }
 
-// Proxy RTT API - keeps the token server-side
+// Build RTT NG API URL. timeFrom is optional HHMM string.
+function rttUrl(from, to, time) {
+  const params = new URLSearchParams();
+  params.set('code', `gb-nr:${from.toUpperCase()}`);
+  if (to) params.set('filterTo', `gb-nr:${to.toUpperCase()}`);
+  if (time) params.set('timeFrom', time);
+  return `https://data.rtt.io/rtt/location?${params}`;
+}
+
+// Proxy RTT NG API - keeps the portal token server-side
 async function handleApi(request, env) {
   const url = new URL(request.url);
   const from = url.searchParams.get("from");
   const to = url.searchParams.get("to");
-  const date = url.searchParams.get("date"); // YYYY-MM-DD
-  const time = url.searchParams.get("time"); // HHMM (4 digits)
+  const time = url.searchParams.get("time"); // HHMM (4 digits, optional)
 
   if (!from) {
     return new Response(JSON.stringify({ error: "Missing 'from' parameter" }), {
@@ -264,20 +261,38 @@ async function handleApi(request, env) {
     });
   }
 
-  if (!env.RTT_USERNAME || !env.RTT_PASSWORD) {
+  if (!env.RTT_PORTAL_TOKEN) {
     return new Response(
       JSON.stringify({ error: "RTT credentials not configured - contact the fleet" }),
       { status: 503, headers: { "Content-Type": "application/json" } }
     );
   }
 
-  const apiUrl = rttUrl(from, to, date, time);
-  const basicAuth = btoa(`${env.RTT_USERNAME}:${env.RTT_PASSWORD}`);
-
   try {
+    // Step 1: Exchange long-lived portal JWT for a short-lived access token (~20 min TTL)
+    const tokenResp = await fetch("https://data.rtt.io/api/get_access_token", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.RTT_PORTAL_TOKEN}`,
+        Accept: "application/json",
+      },
+    });
+
+    if (!tokenResp.ok) {
+      const body = await tokenResp.text();
+      return new Response(
+        JSON.stringify({ error: `RTT auth failed (${tokenResp.status})`, detail: body }),
+        { status: 502, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    const { token: accessToken } = await tokenResp.json();
+
+    // Step 2: Fetch departures from the RTT NG location endpoint
+    const apiUrl = rttUrl(from, to, time);
     const resp = await fetch(apiUrl, {
       headers: {
-        Authorization: `Basic ${basicAuth}`,
+        Authorization: `Bearer ${accessToken}`,
         Accept: "application/json",
       },
     });
@@ -292,35 +307,45 @@ async function handleApi(request, env) {
 
     const data = await resp.json();
 
-    // Simplify the response for the frontend
+    // Map RTT NG response shape to the frontend's expected shape
     const services = (data.services || []).slice(0, 20).map((s) => {
-      const loc = s.locationDetail || {};
-      const dests = (s.destination || []).map((d) => ({
-        name: d.description,
-        crs: d.crs,
-        time: fmtTime(d.publicTime),
+      const dep = s.temporalData?.departure || {};
+      const locMeta = s.locationMetadata || {};
+      const meta = s.scheduleMetadata || {};
+      const destArr = s.destination || [];
+
+      const scheduledDep = fmtIsoTime(dep.scheduleAdvertised);
+      const realtimeDep = fmtIsoTime(dep.realtimeForecast) || scheduledDep;
+
+      // Arrival times come from the first destination's temporalData (populated when filterTo is used)
+      const firstDest = destArr[0] || {};
+      const scheduledArr = fmtIsoTime(firstDest.temporalData?.scheduleAdvertised);
+      const realtimeArr = fmtIsoTime(firstDest.temporalData?.realtimeForecast) || scheduledArr;
+
+      const destinations = destArr.map((d) => ({
+        name: d.location?.description || "",
+        time: fmtIsoTime(d.temporalData?.scheduleAdvertised),
       }));
+
       return {
-        uid: s.serviceUid,
-        trainId: s.trainIdentity,
-        operator: s.atocName || s.atocCode || "",
-        scheduledDep: fmtTime(loc.gbttBookedDeparture),
-        realtimeDep: fmtTime(loc.realtimeDeparture || loc.gbttBookedDeparture),
-        scheduledArr: fmtTime(loc.gbttBookedArrival),
-        realtimeArr: fmtTime(loc.realtimeArrival || loc.gbttBookedArrival),
-        platform: loc.platform || "--",
-        cancelled: loc.cancelReasonCode ? true : false,
-        displayAs: loc.displayAs || "",
-        destinations: dests,
+        uid: meta.uniqueIdentity || "",
+        operator: meta.operator?.name || meta.operator?.code || "",
+        scheduledDep,
+        realtimeDep,
+        scheduledArr,
+        realtimeArr,
+        platform: locMeta.platform?.actual || locMeta.platform?.planned || "--",
+        cancelled: dep.isCancelled || false,
+        destinations,
       };
     });
 
     return new Response(
       JSON.stringify({
-        from: data.location?.name || from,
+        from: data.query?.location?.description || from,
         fromCrs: from.toUpperCase(),
         services,
-        generatedAt: data.generatedAt || new Date().toISOString(),
+        generatedAt: new Date().toISOString(),
       }),
       { headers: { "Content-Type": "application/json" } }
     );
@@ -667,6 +692,135 @@ function handleHtml() {
 
     footer a { color: var(--muted); text-decoration: none; }
     footer a:hover { color: var(--text); }
+
+    /* ── Saved journeys ────────���─────────────────────────────────────────── */
+    .saved-panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      margin-bottom: 24px;
+    }
+
+    .saved-panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+
+    .saved-panel-header h2 {
+      font-size: 0.875rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+    }
+
+    .saved-panel-header .refresh-note {
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+
+    .saved-journey-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 12px 0;
+      border-top: 1px solid var(--border);
+    }
+
+    .saved-journey-row:first-child { border-top: none; padding-top: 0; }
+
+    .saved-route-label {
+      font-size: 0.9375rem;
+      font-weight: 600;
+      min-width: 180px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .saved-times {
+      flex: 1;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .saved-train-chip {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 5px 10px;
+      font-size: 0.8125rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .saved-train-chip.on-time { border-color: #166534; background: #052e16; color: #86efac; }
+    .saved-train-chip.late { border-color: #92400e; background: #1c1007; color: #fcd34d; }
+    .saved-train-chip.cancelled { border-color: #991b1b; background: #1c0909; color: #fca5a5; text-decoration: line-through; }
+    .saved-train-chip .plat { color: var(--muted); font-size: 0.75rem; }
+
+    .saved-controls {
+      display: flex;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .btn-saved-search {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 0.8125rem;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    .btn-saved-search:hover { background: var(--accent-dark); }
+
+    .btn-remove-journey {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 0.8125rem;
+      cursor: pointer;
+    }
+
+    .btn-remove-journey:hover { color: var(--red); border-color: var(--red); }
+
+    .saved-loading { color: var(--muted); font-size: 0.8125rem; padding: 4px 0; }
+
+    .save-bar {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .btn-save-journey {
+      background: transparent;
+      color: var(--accent);
+      border: 1px solid var(--accent);
+      border-radius: 6px;
+      padding: 7px 14px;
+      font-size: 0.875rem;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .btn-save-journey:hover { background: rgba(79,110,247,0.12); }
+
+    .save-bar .saved-note {
+      font-size: 0.8125rem;
+      color: var(--green);
+    }
   </style>
 </head>
 <body>
@@ -722,6 +876,16 @@ function handleHtml() {
       </div>
       <button class="btn-now" id="btn-now" title="Reset to now">Now</button>
       <button id="btn-search">Search</button>
+    </div>
+  </div>
+
+  <div id="saved-panel" style="display:none">
+    <div class="saved-panel">
+      <div class="saved-panel-header">
+        <h2>Saved journeys</h2>
+        <span class="refresh-note" id="saved-refresh-note"></span>
+      </div>
+      <div id="saved-list"></div>
     </div>
   </div>
 
@@ -864,9 +1028,9 @@ function handleHtml() {
     const dateVal = document.getElementById('date-input').value;
     const timeVal = document.getElementById('time-input').value.replace(':', '');
 
+    // RTT NG API uses timeFrom (HHMM) for time filtering; date is display-only
     const params = new URLSearchParams({ from });
     if (to) params.set('to', to);
-    if (dateVal) params.set('date', dateVal);
     if (timeVal) params.set('time', timeVal);
 
     resultsEl.innerHTML = \`
@@ -890,6 +1054,30 @@ function handleHtml() {
       }
 
       renderResults(data, fromName || from, toName || to, dateVal, timeVal);
+
+      // Show save-journey bar when both from and to are set
+      if (from && to) {
+        const alreadySaved = getSavedJourneys().some(j => j.from === from && j.to === to);
+        const saveBar = document.createElement('div');
+        saveBar.className = 'save-bar';
+        if (alreadySaved) {
+          saveBar.innerHTML = \`<span class="saved-note">✓ Journey saved</span>\`;
+        } else {
+          const btn = document.createElement('button');
+          btn.className = 'btn-save-journey';
+          btn.textContent = '+ Save this journey';
+          btn.dataset.from = from;
+          btn.dataset.fromName = fromName || from;
+          btn.dataset.to = to;
+          btn.dataset.toName = toName || to;
+          btn.addEventListener('click', () => {
+            saveJourney(btn.dataset.from, btn.dataset.fromName, btn.dataset.to, btn.dataset.toName);
+            saveBar.innerHTML = \`<span class="saved-note">✓ Journey saved</span>\`;
+          });
+          saveBar.appendChild(btn);
+        }
+        resultsEl.appendChild(saveBar);
+      }
     } catch (err) {
       resultsEl.innerHTML = \`<div class="error-state">Network error: \${err.message}</div>\`;
     } finally {
@@ -999,6 +1187,117 @@ function handleHtml() {
       if (e.key === 'Enter') doSearch();
     });
   });
+
+  // ── Saved journeys ────────────────────────────────────────────────────────
+  const JOURNEYS_KEY = 'train_journeys_v1';
+
+  function getSavedJourneys() {
+    try { return JSON.parse(localStorage.getItem(JOURNEYS_KEY) || '[]'); }
+    catch { return []; }
+  }
+
+  function saveJourney(from, fromName, to, toName) {
+    const journeys = getSavedJourneys();
+    const id = \`\${from}_\${to}\`;
+    if (!journeys.find(j => j.id === id)) {
+      journeys.push({ id, from, fromName, to, toName });
+      localStorage.setItem(JOURNEYS_KEY, JSON.stringify(journeys));
+    }
+    renderSavedPanel();
+  }
+
+  function removeJourney(id) {
+    const journeys = getSavedJourneys().filter(j => j.id !== id);
+    localStorage.setItem(JOURNEYS_KEY, JSON.stringify(journeys));
+    renderSavedPanel();
+  }
+
+  async function fetchSavedTimes(from, to) {
+    try {
+      const params = new URLSearchParams({ from, to });
+      const resp = await fetch(\`/api/trains?\${params}\`);
+      if (!resp.ok) return null;
+      const data = await resp.json();
+      return data.services ? data.services.slice(0, 3) : null;
+    } catch { return null; }
+  }
+
+  function renderChip(svc) {
+    const dep = svc.realtimeDep || svc.scheduledDep || '--';
+    const plat = svc.platform && svc.platform !== '--' ? \` · Plat \${svc.platform}\` : '';
+    let cls = 'saved-train-chip';
+    if (svc.cancelled) cls += ' cancelled';
+    else if (svc.realtimeDep && svc.realtimeDep !== svc.scheduledDep) cls += ' late';
+    else cls += ' on-time';
+    return \`<span class="\${cls}">\${dep}<span class="plat">\${plat}</span></span>\`;
+  }
+
+  async function renderSavedPanel() {
+    const journeys = getSavedJourneys();
+    const panel = document.getElementById('saved-panel');
+    const list = document.getElementById('saved-list');
+
+    if (!journeys.length) {
+      panel.style.display = 'none';
+      return;
+    }
+
+    panel.style.display = '';
+    const note = document.getElementById('saved-refresh-note');
+    note.textContent = 'Refreshing...';
+
+    // Render skeleton rows first
+    list.innerHTML = journeys.map(j => \`
+      <div class="saved-journey-row" id="sj-\${j.id}">
+        <div class="saved-route-label">\${j.fromName} → \${j.toName}</div>
+        <div class="saved-times"><span class="saved-loading">Loading...</span></div>
+        <div class="saved-controls">
+          <button class="btn-saved-search" data-from="\${j.from}" data-from-name="\${encodeURIComponent(j.fromName)}" data-to="\${j.to}" data-to-name="\${encodeURIComponent(j.toName)}">Search</button>
+          <button class="btn-remove-journey" data-id="\${j.id}">✕</button>
+        </div>
+      </div>\`).join('');
+
+    // Wire up buttons
+    list.querySelectorAll('.btn-saved-search').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const fromInput = document.getElementById('from-input');
+        const fromCrsInput = document.getElementById('from-crs');
+        const toInput = document.getElementById('to-input');
+        const toCrsInput = document.getElementById('to-crs');
+        fromInput.value = decodeURIComponent(btn.dataset.fromName);
+        fromCrsInput.value = btn.dataset.from;
+        toInput.value = decodeURIComponent(btn.dataset.toName);
+        toCrsInput.value = btn.dataset.to;
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        doSearch();
+      });
+    });
+
+    list.querySelectorAll('.btn-remove-journey').forEach(btn => {
+      btn.addEventListener('click', () => removeJourney(btn.dataset.id));
+    });
+
+    // Fetch live times for each journey in parallel
+    const fetches = await Promise.all(journeys.map(j => fetchSavedTimes(j.from, j.to)));
+    const now = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    note.textContent = \`Updated \${now}\`;
+
+    journeys.forEach((j, i) => {
+      const row = document.getElementById(\`sj-\${j.id}\`);
+      if (!row) return;
+      const timesEl = row.querySelector('.saved-times');
+      const svcs = fetches[i];
+      if (!svcs || !svcs.length) {
+        timesEl.innerHTML = '<span class="saved-loading">No services found</span>';
+      } else {
+        timesEl.innerHTML = svcs.map(renderChip).join('');
+      }
+    });
+  }
+
+  // Initial render + periodic refresh every 60 seconds
+  renderSavedPanel();
+  setInterval(renderSavedPanel, 60000);
 </script>
 
 </body>
