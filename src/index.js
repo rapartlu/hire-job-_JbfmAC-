@@ -238,6 +238,26 @@ function fmtIsoTime(iso) {
   return m ? `${m[1]}:${m[2]}` : null;
 }
 
+// Calculate journey duration in minutes from two HH:MM strings.
+// Handles overnight (arrival before departure wraps to next day).
+function durationMins(dep, arr) {
+  if (!dep || !arr) return null;
+  const [dh, dm] = dep.split(":").map(Number);
+  const [ah, am] = arr.split(":").map(Number);
+  let mins = ah * 60 + am - (dh * 60 + dm);
+  if (mins < 0) mins += 24 * 60;
+  return mins;
+}
+
+// Format duration as "45 min" or "1h 15m"
+function fmtDuration(mins) {
+  if (mins == null) return null;
+  if (mins < 60) return `${mins} min`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+
 // Build RTT NG API URL. timeFrom is optional HHMM string.
 function rttUrl(from, to, time) {
   const params = new URLSearchParams();
@@ -245,6 +265,67 @@ function rttUrl(from, to, time) {
   if (to) params.set('filterTo', `gb-nr:${to.toUpperCase()}`);
   if (time) params.set('timeFrom', time);
   return `https://data.rtt.io/rtt/location?${params}`;
+}
+
+// Exchange long-lived portal JWT for a short-lived access token (~20 min TTL)
+async function getRttAccessToken(env) {
+  const tokenResp = await fetch("https://data.rtt.io/api/get_access_token", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.RTT_PORTAL_TOKEN}`,
+      Accept: "application/json",
+    },
+  });
+  if (!tokenResp.ok) {
+    const body = await tokenResp.text();
+    throw new Error(`RTT auth failed (${tokenResp.status}): ${body}`);
+  }
+  const { token } = await tokenResp.json();
+  return token;
+}
+
+// Map a single RTT NG service object to our simplified shape
+function mapService(s) {
+  const dep = s.temporalData?.departure || {};
+  const locMeta = s.locationMetadata || {};
+  const meta = s.scheduleMetadata || {};
+  const destArr = s.destination || [];
+
+  const scheduledDep = fmtIsoTime(dep.scheduleAdvertised);
+  const realtimeDep = fmtIsoTime(dep.realtimeForecast) || scheduledDep;
+
+  // Arrival times come from the first destination's temporalData (when filterTo is used)
+  const firstDest = destArr[0] || {};
+  const scheduledArr = fmtIsoTime(firstDest.temporalData?.scheduleAdvertised);
+  const realtimeArr = fmtIsoTime(firstDest.temporalData?.realtimeForecast) || scheduledArr;
+
+  // Final destination = last stop of the train service
+  const lastDest = destArr[destArr.length - 1] || firstDest;
+  const finalDestination = lastDest.location?.description || null;
+
+  // All intermediate stops (shown when no filterTo is given)
+  const destinations = destArr.map((d) => ({
+    name: d.location?.description || "",
+    time: fmtIsoTime(d.temporalData?.scheduleAdvertised),
+  }));
+
+  // Journey duration (only meaningful when filterTo is set and arr is available)
+  const durMins = durationMins(scheduledDep, scheduledArr);
+
+  return {
+    uid: meta.uniqueIdentity || "",
+    operator: meta.operator?.name || meta.operator?.code || "",
+    scheduledDep,
+    realtimeDep,
+    scheduledArr,
+    realtimeArr,
+    platform: locMeta.platform?.actual || locMeta.platform?.planned || "--",
+    cancelled: dep.isCancelled || false,
+    destinations,
+    finalDestination,
+    durationMins: durMins,
+    duration: fmtDuration(durMins),
+  };
 }
 
 // Proxy RTT NG API - keeps the portal token server-side
@@ -269,32 +350,11 @@ async function handleApi(request, env) {
   }
 
   try {
-    // Step 1: Exchange long-lived portal JWT for a short-lived access token (~20 min TTL)
-    const tokenResp = await fetch("https://data.rtt.io/api/get_access_token", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.RTT_PORTAL_TOKEN}`,
-        Accept: "application/json",
-      },
-    });
+    const accessToken = await getRttAccessToken(env);
 
-    if (!tokenResp.ok) {
-      const body = await tokenResp.text();
-      return new Response(
-        JSON.stringify({ error: `RTT auth failed (${tokenResp.status})`, detail: body }),
-        { status: 502, headers: { "Content-Type": "application/json" } }
-      );
-    }
-
-    const { token: accessToken } = await tokenResp.json();
-
-    // Step 2: Fetch departures from the RTT NG location endpoint
     const apiUrl = rttUrl(from, to, time);
     const resp = await fetch(apiUrl, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Accept: "application/json",
-      },
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
     });
 
     if (!resp.ok) {
@@ -306,39 +366,7 @@ async function handleApi(request, env) {
     }
 
     const data = await resp.json();
-
-    // Map RTT NG response shape to the frontend's expected shape
-    const services = (data.services || []).slice(0, 20).map((s) => {
-      const dep = s.temporalData?.departure || {};
-      const locMeta = s.locationMetadata || {};
-      const meta = s.scheduleMetadata || {};
-      const destArr = s.destination || [];
-
-      const scheduledDep = fmtIsoTime(dep.scheduleAdvertised);
-      const realtimeDep = fmtIsoTime(dep.realtimeForecast) || scheduledDep;
-
-      // Arrival times come from the first destination's temporalData (populated when filterTo is used)
-      const firstDest = destArr[0] || {};
-      const scheduledArr = fmtIsoTime(firstDest.temporalData?.scheduleAdvertised);
-      const realtimeArr = fmtIsoTime(firstDest.temporalData?.realtimeForecast) || scheduledArr;
-
-      const destinations = destArr.map((d) => ({
-        name: d.location?.description || "",
-        time: fmtIsoTime(d.temporalData?.scheduleAdvertised),
-      }));
-
-      return {
-        uid: meta.uniqueIdentity || "",
-        operator: meta.operator?.name || meta.operator?.code || "",
-        scheduledDep,
-        realtimeDep,
-        scheduledArr,
-        realtimeArr,
-        platform: locMeta.platform?.actual || locMeta.platform?.planned || "--",
-        cancelled: dep.isCancelled || false,
-        destinations,
-      };
-    });
+    const services = (data.services || []).slice(0, 20).map(mapService);
 
     return new Response(
       JSON.stringify({
@@ -352,6 +380,61 @@ async function handleApi(request, env) {
   } catch (err) {
     return new Response(
       JSON.stringify({ error: "Failed to fetch from RTT", detail: err.message }),
+      { status: 502, headers: { "Content-Type": "application/json" } }
+    );
+  }
+}
+
+// Last train of the day - queries late-evening slots and returns the latest service found.
+// Tries 22:00, 21:00, 20:00 until a result is found (covers most lines).
+async function handleLastTrain(request, env) {
+  const url = new URL(request.url);
+  const from = url.searchParams.get("from");
+  const to = url.searchParams.get("to");
+
+  if (!from || !to) {
+    return new Response(JSON.stringify({ error: "Missing 'from' or 'to' parameter" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  if (!env.RTT_PORTAL_TOKEN) {
+    return new Response(
+      JSON.stringify({ error: "RTT credentials not configured" }),
+      { status: 503, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  try {
+    const accessToken = await getRttAccessToken(env);
+
+    // Try progressively earlier query times until we find services
+    const trialTimes = ["2200", "2100", "2000", "1900"];
+    let lastService = null;
+
+    for (const t of trialTimes) {
+      const apiUrl = rttUrl(from, to, t);
+      const resp = await fetch(apiUrl, {
+        headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+      });
+      if (!resp.ok) break;
+      const data = await resp.json();
+      const svcs = data.services || [];
+      if (svcs.length > 0) {
+        // Take the last service in this window - it's the latest known train
+        lastService = mapService(svcs[svcs.length - 1]);
+        break;
+      }
+    }
+
+    return new Response(
+      JSON.stringify({ lastService, generatedAt: new Date().toISOString() }),
+      { headers: { "Content-Type": "application/json" } }
+    );
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ error: "Failed to fetch last train", detail: err.message }),
       { status: 502, headers: { "Content-Type": "application/json" } }
     );
   }
@@ -389,6 +472,7 @@ function handleHtml() {
       --green: #34d399;
       --amber: #f59e0b;
       --red: #ef4444;
+      --purple: #a78bfa;
       --radius: 8px;
       --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
     }
@@ -427,7 +511,7 @@ function handleHtml() {
 
     main {
       flex: 1;
-      max-width: 860px;
+      max-width: 900px;
       width: 100%;
       margin: 0 auto;
       padding: 32px 16px 64px;
@@ -549,14 +633,15 @@ function handleHtml() {
 
     .time-row {
       display: grid;
-      grid-template-columns: 1fr 1fr auto;
+      grid-template-columns: 1fr 1fr auto auto;
       gap: 12px;
       align-items: flex-end;
     }
 
     @media (max-width: 600px) {
       .time-row { grid-template-columns: 1fr 1fr; }
-      .time-row button { grid-column: span 2; }
+      .time-row .btn-now,
+      .time-row .btn-search { grid-column: span 1; }
     }
 
     button {
@@ -665,6 +750,30 @@ function handleHtml() {
     .time-actual.late { color: var(--amber); }
     .time-actual.cancelled { color: var(--red); }
 
+    .duration-badge {
+      display: inline-block;
+      font-size: 0.7rem;
+      color: var(--muted);
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 5px;
+      margin-top: 4px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .final-dest {
+      font-size: 0.8125rem;
+      color: var(--muted);
+      display: block;
+      margin-top: 2px;
+    }
+
+    .final-dest strong {
+      color: var(--text);
+      font-weight: 500;
+    }
+
     .status-on-time { color: var(--green); font-size: 0.8rem; }
     .status-late { color: var(--amber); font-size: 0.8rem; }
     .status-cancelled { color: var(--red); font-size: 0.8rem; }
@@ -703,6 +812,40 @@ function handleHtml() {
 
     @keyframes spin { to { transform: rotate(360deg); } }
 
+    /* Last train banner */
+    .last-train-banner {
+      margin-top: 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .last-train-banner .lbl {
+      font-size: 0.75rem;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .last-train-time {
+      font-size: 1.25rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      color: var(--purple);
+    }
+
+    .last-train-detail {
+      font-size: 0.8125rem;
+      color: var(--muted);
+    }
+
     footer {
       text-align: center;
       padding: 20px;
@@ -714,7 +857,7 @@ function handleHtml() {
     footer a { color: var(--muted); text-decoration: none; }
     footer a:hover { color: var(--text); }
 
-    /* ── Saved journeys ────────���─────────────────────────────────────────── */
+    /* ── Saved journeys ──────────────────────────────────────────────────────── */
     .saved-panel {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -781,6 +924,7 @@ function handleHtml() {
       flex-wrap: wrap;
       gap: 8px;
       min-width: 0;
+      align-items: flex-start;
     }
 
     .saved-train-chip {
@@ -792,10 +936,41 @@ function handleHtml() {
       font-variant-numeric: tabular-nums;
     }
 
+    .saved-train-chip .chip-main {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .saved-train-chip .chip-dur {
+      font-size: 0.7rem;
+      color: var(--muted);
+      display: block;
+      margin-top: 2px;
+    }
+
     .saved-train-chip.on-time { border-color: #166534; background: #052e16; color: #86efac; }
     .saved-train-chip.late { border-color: #92400e; background: #1c1007; color: #fcd34d; }
     .saved-train-chip.cancelled { border-color: #991b1b; background: #1c0909; color: #fca5a5; text-decoration: line-through; }
     .saved-train-chip .plat { color: var(--muted); font-size: 0.75rem; }
+
+    /* Last train chip in saved panel */
+    .saved-last-chip {
+      background: rgba(167,139,250,0.1);
+      border: 1px solid rgba(167,139,250,0.3);
+      border-radius: 6px;
+      padding: 5px 10px;
+      font-size: 0.8125rem;
+      font-variant-numeric: tabular-nums;
+      color: var(--purple);
+      white-space: nowrap;
+    }
+
+    .saved-last-chip .lbl {
+      font-size: 0.7rem;
+      opacity: 0.7;
+      display: block;
+    }
 
     .saved-controls {
       display: flex;
@@ -921,7 +1096,7 @@ function handleHtml() {
         <input type="time" id="time-input" />
       </div>
       <button class="btn-now" id="btn-now" title="Reset to now">Now</button>
-      <button id="btn-search">Search</button>
+      <button id="btn-search" class="btn-search">Search</button>
     </div>
   </div>
 
@@ -1025,18 +1200,12 @@ function handleHtml() {
     });
 
     input.addEventListener('blur', () => {
-      // Short delay so mousedown fires first
       setTimeout(() => { list.hidden = true; }, 150);
-
-      // If user typed a 3-letter CRS directly, accept it
       const v = input.value.trim().toUpperCase();
       if (!crsHidden.value && v.length === 3) {
-        const match = STATIONS.find(s => s.crs === v);
-        if (match) select(match);
-        else {
-          // Unknown CRS - accept as-is and use uppercase as crs
-          crsHidden.value = v;
-        }
+        const matched = STATIONS.find(s => s.crs === v);
+        if (matched) select(matched);
+        else crsHidden.value = v;
       }
     });
   }
@@ -1064,7 +1233,6 @@ function handleHtml() {
     const dateVal = document.getElementById('date-input').value;
     const timeVal = document.getElementById('time-input').value.replace(':', '');
 
-    // RTT NG API uses timeFrom (HHMM) for time filtering; date is display-only
     const params = new URLSearchParams({ from });
     if (to) params.set('to', to);
     if (timeVal) params.set('time', timeVal);
@@ -1078,20 +1246,24 @@ function handleHtml() {
     document.getElementById('btn-search').disabled = true;
 
     try {
-      const resp = await fetch(\`/api/trains?\${params}\`);
-      const data = await resp.json();
+      // Fetch departures and (if to is set) last train in parallel
+      const fetchDeps = fetch(\`/api/trains?\${params}\`).then(r => r.json());
+      const fetchLast = (from && to)
+        ? fetch(\`/api/last-train?from=\${encodeURIComponent(from)}&to=\${encodeURIComponent(to)}\`).then(r => r.json()).catch(() => null)
+        : Promise.resolve(null);
 
-      if (!resp.ok || data.error) {
+      const [data, lastData] = await Promise.all([fetchDeps, fetchLast]);
+
+      if (data.error) {
         resultsEl.innerHTML = \`<div class="error-state">
-          <p>Could not fetch train times: \${data.error || resp.statusText}</p>
+          <p>Could not fetch train times: \${data.error}</p>
           \${data.detail ? \`<p style="margin-top:8px;font-size:0.8rem;opacity:0.7">\${data.detail}</p>\` : ''}
         </div>\`;
         return;
       }
 
-      renderResults(data, fromName || from, toName || to, dateVal, timeVal);
+      renderResults(data, fromName || from, toName || to, dateVal, timeVal, lastData);
 
-      // Show save-journey bar when both from and to are set
       if (from && to) {
         const alreadySaved = getSavedJourneys().some(j => j.from === from && j.to === to);
         const saveBar = document.createElement('div');
@@ -1121,7 +1293,7 @@ function handleHtml() {
     }
   }
 
-  function renderResults(data, fromLabel, toLabel, dateVal, timeVal) {
+  function renderResults(data, fromLabel, toLabel, dateVal, timeVal, lastData) {
     if (!data.services || !data.services.length) {
       resultsEl.innerHTML = \`
         <div class="results-header">
@@ -1132,16 +1304,23 @@ function handleHtml() {
       return;
     }
 
-    const heading = toLabel
-      ? \`\${data.from} → \${toLabel}\`
-      : \`Departures from \${data.from}\`;
-
+    const heading = toLabel ? \`\${data.from} → \${toLabel}\` : \`Departures from \${data.from}\`;
     const timeDisplay = formatDisplayTime(dateVal, timeVal);
 
     const rows = data.services.map(s => {
       const cancelled = s.cancelled;
       const depStatus = statusLabel(s.scheduledDep, s.realtimeDep, cancelled);
       const arrStatus = s.scheduledArr ? statusLabel(s.scheduledArr, s.realtimeArr, cancelled) : null;
+
+      // Duration badge (shown when filtering to a destination)
+      const durBadge = (toLabel && s.duration)
+        ? \`<span class="duration-badge">\${s.duration}</span>\`
+        : '';
+
+      // Final destination (the train's terminus, not the filtered-to stop)
+      const finalDestCell = (toLabel && s.finalDestination && s.finalDestination !== toLabel)
+        ? \`<span class="final-dest">to <strong>\${s.finalDestination}</strong></span>\`
+        : '';
 
       const destText = s.destinations.map(d => d.time ? \`\${d.name} (\${d.time})\` : d.name).join(', ');
 
@@ -1153,6 +1332,8 @@ function handleHtml() {
         \${toLabel ? \`<td>
           <div class="arr-time">\${s.realtimeArr || s.scheduledArr || '--'}</div>
           \${arrStatus ? arrStatus.html : ''}
+          \${durBadge}
+          \${finalDestCell}
         </td>\` : \`<td><div class="dest-list">\${destText || '--'}</div></td>\`}
         <td class="platform">\${s.platform}</td>
         <td class="\${depStatus.cls}">\${depStatus.label}</td>
@@ -1160,9 +1341,7 @@ function handleHtml() {
       </tr>\`;
     }).join('');
 
-    const toCol = toLabel
-      ? '<th>Arrives</th>'
-      : '<th>Destination</th>';
+    const toCol = toLabel ? '<th>Arrives · Duration · To</th>' : '<th>Destination</th>';
 
     resultsEl.innerHTML = \`
       <div class="results-header">
@@ -1183,6 +1362,21 @@ function handleHtml() {
           <tbody>\${rows}</tbody>
         </table>
       </div>\`;
+
+    // Last train banner (only when filtering to a destination)
+    if (toLabel && lastData && lastData.lastService) {
+      const ls = lastData.lastService;
+      const durStr = ls.duration ? \` &middot; \${ls.duration}\` : '';
+      const termStr = (ls.finalDestination && ls.finalDestination !== toLabel)
+        ? \` &middot; to \${ls.finalDestination}\`
+        : '';
+      resultsEl.insertAdjacentHTML('beforeend', \`
+        <div class="last-train-banner">
+          <span class="lbl">Last train today</span>
+          <span class="last-train-time">\${ls.scheduledDep}</span>
+          <span class="last-train-detail">arr \${ls.scheduledArr || '--'}\${durStr}\${termStr} &middot; \${ls.operator}</span>
+        </div>\`);
+    }
   }
 
   function statusLabel(sched, actual, cancelled) {
@@ -1190,7 +1384,6 @@ function handleHtml() {
     if (!sched || !actual || sched === actual) {
       return { label: 'On time', cls: 'status-on-time', html: '' };
     }
-    // Compare as HHMM integers
     const s = parseInt(sched.replace(':', ''), 10);
     const a = parseInt(actual.replace(':', ''), 10);
     const late = a - s;
@@ -1217,7 +1410,6 @@ function handleHtml() {
 
   document.getElementById('btn-search').addEventListener('click', doSearch);
 
-  // Swap from/to stations
   document.getElementById('btn-swap').addEventListener('click', () => {
     const fromInput = document.getElementById('from-input');
     const fromCrs = document.getElementById('from-crs');
@@ -1231,7 +1423,6 @@ function handleHtml() {
     toCrs.value = tmpCrs;
   });
 
-  // Allow pressing Enter in inputs to trigger search
   ['from-input', 'to-input', 'date-input', 'time-input'].forEach(id => {
     document.getElementById(id).addEventListener('keydown', (e) => {
       if (e.key === 'Enter') doSearch();
@@ -1272,14 +1463,36 @@ function handleHtml() {
     } catch { return null; }
   }
 
+  async function fetchLastTrain(from, to) {
+    try {
+      const resp = await fetch(\`/api/last-train?from=\${encodeURIComponent(from)}&to=\${encodeURIComponent(to)}\`);
+      if (!resp.ok) return null;
+      const data = await resp.json();
+      return data.lastService || null;
+    } catch { return null; }
+  }
+
   function renderChip(svc) {
     const dep = svc.realtimeDep || svc.scheduledDep || '--';
+    const arr = svc.scheduledArr ? \` → \${svc.realtimeArr || svc.scheduledArr}\` : '';
     const plat = svc.platform && svc.platform !== '--' ? \` · Plat \${svc.platform}\` : '';
+    const durStr = svc.duration ? svc.duration : '';
     let cls = 'saved-train-chip';
     if (svc.cancelled) cls += ' cancelled';
     else if (svc.realtimeDep && svc.realtimeDep !== svc.scheduledDep) cls += ' late';
     else cls += ' on-time';
-    return \`<span class="\${cls}">\${dep}<span class="plat">\${plat}</span></span>\`;
+    return \`<div class="\${cls}">
+      <div class="chip-main"><span>\${dep}\${arr}</span><span class="plat">\${plat}</span></div>
+      \${durStr ? \`<span class="chip-dur">\${durStr}</span>\` : ''}
+    </div>\`;
+  }
+
+  function renderLastChip(ls) {
+    if (!ls) return '';
+    return \`<div class="saved-last-chip">
+      <span class="lbl">Last train</span>
+      <strong>\${ls.scheduledDep}</strong>\${ls.duration ? \` · \${ls.duration}\` : ''}
+    </div>\`;
   }
 
   async function renderSavedPanel() {
@@ -1296,7 +1509,6 @@ function handleHtml() {
     const note = document.getElementById('saved-refresh-note');
     note.textContent = 'Refreshing...';
 
-    // Render skeleton rows first
     list.innerHTML = journeys.map(j => \`
       <div class="saved-journey-row" id="sj-\${j.id}">
         <div class="saved-route-label">\${j.fromName} → \${j.toName}</div>
@@ -1307,7 +1519,6 @@ function handleHtml() {
         </div>
       </div>\`).join('');
 
-    // Wire up buttons
     list.querySelectorAll('.btn-saved-search').forEach(btn => {
       btn.addEventListener('click', () => {
         const fromInput = document.getElementById('from-input');
@@ -1327,8 +1538,12 @@ function handleHtml() {
       btn.addEventListener('click', () => removeJourney(btn.dataset.id));
     });
 
-    // Fetch live times for each journey in parallel
-    const fetches = await Promise.all(journeys.map(j => fetchSavedTimes(j.from, j.to)));
+    // Fetch live times AND last train for each journey in parallel
+    const results = await Promise.all(journeys.map(async j => ({
+      svcs: await fetchSavedTimes(j.from, j.to),
+      last: await fetchLastTrain(j.from, j.to),
+    })));
+
     const now = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
     note.textContent = \`Updated \${now}\`;
 
@@ -1336,16 +1551,18 @@ function handleHtml() {
       const row = document.getElementById(\`sj-\${j.id}\`);
       if (!row) return;
       const timesEl = row.querySelector('.saved-times');
-      const svcs = fetches[i];
+      const { svcs, last } = results[i];
+      let html = '';
       if (!svcs || !svcs.length) {
-        timesEl.innerHTML = '<span class="saved-loading">No services found</span>';
+        html = '<span class="saved-loading">No services found</span>';
       } else {
-        timesEl.innerHTML = svcs.map(renderChip).join('');
+        html = svcs.map(renderChip).join('');
       }
+      html += renderLastChip(last);
+      timesEl.innerHTML = html;
     });
   }
 
-  // Initial render + periodic refresh every 60 seconds
   renderSavedPanel();
   setInterval(renderSavedPanel, 60000);
 </script>
@@ -1367,11 +1584,14 @@ export default {
       return handleApi(request, env);
     }
 
+    if (url.pathname === "/api/last-train") {
+      return handleLastTrain(request, env);
+    }
+
     if (url.pathname === "/api/stations") {
       return handleStations();
     }
 
-    // Everything else serves the HTML page
     return handleHtml();
   },
 };
