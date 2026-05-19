@@ -259,11 +259,12 @@ function fmtDuration(mins) {
 }
 
 // Build RTT NG API URL. timeFrom is optional HHMM string.
-function rttUrl(from, to, time) {
+function rttUrl(from, to, time, type) {
   const params = new URLSearchParams();
   params.set('code', `gb-nr:${from.toUpperCase()}`);
   if (to) params.set('filterTo', `gb-nr:${to.toUpperCase()}`);
   if (time) params.set('timeFrom', time);
+  if (type) params.set('type', type);
   return `https://data.rtt.io/rtt/location?${params}`;
 }
 
@@ -328,6 +329,24 @@ function mapService(s) {
   };
 }
 
+// Augment a departure-board service with arrival timing from the arrivals board.
+// RTT filterTo misses through-services; the arrivals board includes them.
+function mapServiceWithArr(depSvc, arrSvc) {
+  const base = mapService(depSvc);
+  if (!arrSvc) return base;
+  const arrTemporal = arrSvc.temporalData?.arrival || {};
+  const scheduledArr = fmtIsoTime(arrTemporal.scheduleAdvertised);
+  const realtimeArr = fmtIsoTime(arrTemporal.realtimeForecast) || scheduledArr;
+  if (scheduledArr) {
+    base.scheduledArr = scheduledArr;
+    base.realtimeArr = realtimeArr;
+    const durMins = durationMins(base.scheduledDep, scheduledArr);
+    base.durationMins = durMins;
+    base.duration = fmtDuration(durMins);
+  }
+  return base;
+}
+
 // Proxy RTT NG API - keeps the portal token server-side
 async function handleApi(request, env) {
   const url = new URL(request.url);
@@ -351,12 +370,61 @@ async function handleApi(request, env) {
 
   try {
     const accessToken = await getRttAccessToken(env);
+    const rttHeaders = { Authorization: `Bearer ${accessToken}`, Accept: "application/json" };
 
-    const apiUrl = rttUrl(from, to, time);
-    const resp = await fetch(apiUrl, {
-      headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
-    });
+    if (to) {
+      // Dual-board approach: query departures from 'from' AND arrivals at 'to' in parallel.
+      // RTT's filterTo parameter misses through-services (trains where the destination
+      // is not the terminus). Cross-referencing by serviceUid catches them.
+      const [depsResp, arrsResp] = await Promise.all([
+        fetch(rttUrl(from, null, time), { headers: rttHeaders }),
+        fetch(rttUrl(to, null, time, 'arrivals'), { headers: rttHeaders }),
+      ]);
 
+      if (!depsResp.ok) {
+        const body = await depsResp.text();
+        return new Response(
+          JSON.stringify({ error: `RTT API error ${depsResp.status}`, detail: body }),
+          { status: depsResp.status, headers: { "Content-Type": "application/json" } }
+        );
+      }
+
+      const depsData = await depsResp.json();
+      const arrsData = arrsResp.ok ? await arrsResp.json() : { services: [] };
+      const depServices = depsData.services || [];
+      const arrServices = arrsData.services || [];
+
+      // Build lookup: serviceUid → arrival-board service
+      const arrByUid = {};
+      for (const s of arrServices) {
+        const uid = s.scheduleMetadata?.uniqueIdentity;
+        if (uid) arrByUid[uid] = s;
+      }
+
+      // Keep only departures that also appear in the arrivals board at destination
+      const matched = depServices.filter(s => {
+        const uid = s.scheduleMetadata?.uniqueIdentity;
+        return uid && arrByUid[uid];
+      });
+
+      const services = matched.slice(0, 20).map(s => {
+        const uid = s.scheduleMetadata?.uniqueIdentity;
+        return mapServiceWithArr(s, arrByUid[uid]);
+      });
+
+      return new Response(
+        JSON.stringify({
+          from: depsData.query?.location?.description || from,
+          fromCrs: from.toUpperCase(),
+          services,
+          generatedAt: new Date().toISOString(),
+        }),
+        { headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    // No destination specified - return all departures from 'from'
+    const resp = await fetch(rttUrl(from, null, time), { headers: rttHeaders });
     if (!resp.ok) {
       const body = await resp.text();
       return new Response(
@@ -364,7 +432,6 @@ async function handleApi(request, env) {
         { status: resp.status, headers: { "Content-Type": "application/json" } }
       );
     }
-
     const data = await resp.json();
     const services = (data.services || []).slice(0, 20).map(mapService);
 
