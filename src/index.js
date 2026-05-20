@@ -335,8 +335,15 @@ function mapServiceWithArr(depSvc, arrSvc) {
   const base = mapService(depSvc);
   if (!arrSvc) return base;
   const arrTemporal = arrSvc.temporalData?.arrival || {};
-  const scheduledArr = fmtIsoTime(arrTemporal.scheduleAdvertised);
-  const realtimeArr = fmtIsoTime(arrTemporal.realtimeForecast) || scheduledArr;
+  // RTT NG populates scheduleAdvertised for terminus stops; for intermediate
+  // through-service stops it may be absent - fall back to realtimeForecast or
+  // realtimeActual so the user sees a duration rather than the final-stop duration.
+  const scheduledArr = fmtIsoTime(arrTemporal.scheduleAdvertised)
+    || fmtIsoTime(arrTemporal.realtimeForecast)
+    || fmtIsoTime(arrTemporal.realtimeActual);
+  const realtimeArr = fmtIsoTime(arrTemporal.realtimeForecast)
+    || fmtIsoTime(arrTemporal.realtimeActual)
+    || scheduledArr;
   if (scheduledArr) {
     base.scheduledArr = scheduledArr;
     base.realtimeArr = realtimeArr;
@@ -1393,11 +1400,11 @@ function handleHtml() {
 
       return \`<tr>
         <td>
-          <div class="dep-time">\${s.realtimeDep || s.scheduledDep}</div>
+          <div class="dep-time">\${s.scheduledDep}</div>
           \${depStatus.html}
         </td>
         \${toLabel ? \`<td>
-          <div class="arr-time">\${s.realtimeArr || s.scheduledArr || '--'}</div>
+          <div class="arr-time">\${s.scheduledArr || '--'}</div>
           \${arrStatus ? arrStatus.html : ''}
           \${durBadge}
           \${finalDestCell}
@@ -1540,8 +1547,10 @@ function handleHtml() {
   }
 
   function renderChip(svc) {
-    const dep = svc.realtimeDep || svc.scheduledDep || '--';
-    const arr = svc.scheduledArr ? \` → \${svc.realtimeArr || svc.scheduledArr}\` : '';
+    const dep = svc.scheduledDep || '--';
+    const depDelay = (svc.realtimeDep && svc.realtimeDep !== svc.scheduledDep) ? \` (exp \${svc.realtimeDep})\` : '';
+    const arr = svc.scheduledArr ? \` → \${svc.scheduledArr}\` : '';
+    const arrDelay = (svc.scheduledArr && svc.realtimeArr && svc.realtimeArr !== svc.scheduledArr) ? \` (exp \${svc.realtimeArr})\` : '';
     const plat = svc.platform && svc.platform !== '--' ? \` · Plat \${svc.platform}\` : '';
     const durStr = svc.duration ? svc.duration : '';
     let cls = 'saved-train-chip';
@@ -1549,7 +1558,7 @@ function handleHtml() {
     else if (svc.realtimeDep && svc.realtimeDep !== svc.scheduledDep) cls += ' late';
     else cls += ' on-time';
     return \`<div class="\${cls}">
-      <div class="chip-main"><span>\${dep}\${arr}</span><span class="plat">\${plat}</span></div>
+      <div class="chip-main"><span>\${dep}\${depDelay}\${arr}\${arrDelay}</span><span class="plat">\${plat}</span></div>
       \${durStr ? \`<span class="chip-dur">\${durStr}</span>\` : ''}
     </div>\`;
   }
