@@ -240,12 +240,15 @@ function fmtIsoTime(iso) {
 
 // Calculate journey duration in minutes from two HH:MM strings.
 // Handles overnight (arrival before departure wraps to next day).
+// Cap at 480 min (8h): anything larger indicates a cross-service data mismatch,
+// not a genuine overnight UK journey.
 function durationMins(dep, arr) {
   if (!dep || !arr) return null;
   const [dh, dm] = dep.split(":").map(Number);
   const [ah, am] = arr.split(":").map(Number);
   let mins = ah * 60 + am - (dh * 60 + dm);
   if (mins < 0) mins += 24 * 60;
+  if (mins > 480) return null;
   return mins;
 }
 
@@ -840,7 +843,9 @@ function handleHtml() {
       font-size: 0.8125rem;
       color: var(--muted);
       display: block;
-      margin-top: 2px;
+      margin-top: 4px;
+      padding-top: 3px;
+      border-top: 1px solid var(--border);
     }
 
     .final-dest strong {
@@ -986,9 +991,15 @@ function handleHtml() {
         min-width: unset;
         white-space: normal;
       }
+      /* On mobile: times take full width (own row), controls sit beneath */
       .saved-times {
-        flex: 1;
+        width: 100%;
+        flex: none;
         min-width: 0;
+      }
+      .saved-controls {
+        width: 100%;
+        justify-content: flex-start;
       }
     }
 
@@ -1021,6 +1032,14 @@ function handleHtml() {
       color: var(--muted);
       display: block;
       margin-top: 2px;
+    }
+
+    .saved-train-chip .chip-final-dest {
+      font-size: 0.7rem;
+      color: var(--muted);
+      display: block;
+      margin-top: 1px;
+      font-style: italic;
     }
 
     .saved-train-chip.on-time { border-color: #166534; background: #052e16; color: #86efac; }
@@ -1553,13 +1572,14 @@ function handleHtml() {
     const arrDelay = (svc.scheduledArr && svc.realtimeArr && svc.realtimeArr !== svc.scheduledArr) ? \` (exp \${svc.realtimeArr})\` : '';
     const plat = svc.platform && svc.platform !== '--' ? \` · Plat \${svc.platform}\` : '';
     const durStr = svc.duration ? svc.duration : '';
+    const finalDestStr = svc.finalDestination ? \`to \${svc.finalDestination}\` : '';
     let cls = 'saved-train-chip';
     if (svc.cancelled) cls += ' cancelled';
     else if (svc.realtimeDep && svc.realtimeDep !== svc.scheduledDep) cls += ' late';
     else cls += ' on-time';
     return \`<div class="\${cls}">
       <div class="chip-main"><span>\${dep}\${depDelay}\${arr}\${arrDelay}</span><span class="plat">\${plat}</span></div>
-      \${durStr ? \`<span class="chip-dur">\${durStr}</span>\` : ''}
+      \${durStr ? \`<span class="chip-dur">\${durStr}\${finalDestStr ? \` · \${finalDestStr}\` : ''}</span>\` : (finalDestStr ? \`<span class="chip-final-dest">\${finalDestStr}</span>\` : '')}
     </div>\`;
   }
 
