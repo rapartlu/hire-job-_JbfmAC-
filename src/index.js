@@ -2,6 +2,9 @@
  * UK Train Times - hire-the-fleet job _JbfmAC-
  * Serves a live departure board between any two UK stations.
  * Data: RealTimeTrains (RTT) API via secure server-side proxy.
+ *
+ * Iteration 4: show-more button (load next departures inline)
+ *              + click-to-expand calling points.
  */
 
 // UK stations with CRS codes - Greater London first, then nationwide.
@@ -239,9 +242,7 @@ function fmtIsoTime(iso) {
 }
 
 // Calculate journey duration in minutes from two HH:MM strings.
-// Handles overnight (arrival before departure wraps to next day).
-// Cap at 480 min (8h): anything larger indicates a cross-service data mismatch,
-// not a genuine overnight UK journey.
+// Cap at 480 min (8h): larger values indicate a cross-service data mismatch.
 function durationMins(dep, arr) {
   if (!dep || !arr) return null;
   const [dh, dm] = dep.split(":").map(Number);
@@ -259,6 +260,15 @@ function fmtDuration(mins) {
   const h = Math.floor(mins / 60);
   const m = mins % 60;
   return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+
+// Return the next HHMM string (HH:MM dep time + 1 minute) for show-more pagination.
+function nextHHMM(hhmmStr) {
+  if (!hhmmStr) return null;
+  const [h, m] = hhmmStr.split(":").map(Number);
+  let total = h * 60 + m + 1;
+  if (total >= 1440) total -= 1440;
+  return String(Math.floor(total / 60)).padStart(2, "0") + String(total % 60).padStart(2, "0");
 }
 
 // Build RTT NG API URL. timeFrom is optional HHMM string.
@@ -333,14 +343,10 @@ function mapService(s) {
 }
 
 // Augment a departure-board service with arrival timing from the arrivals board.
-// RTT filterTo misses through-services; the arrivals board includes them.
 function mapServiceWithArr(depSvc, arrSvc) {
   const base = mapService(depSvc);
   if (!arrSvc) return base;
   const arrTemporal = arrSvc.temporalData?.arrival || {};
-  // RTT NG populates scheduleAdvertised for terminus stops; for intermediate
-  // through-service stops it may be absent - fall back to realtimeForecast or
-  // realtimeActual so the user sees a duration rather than the final-stop duration.
   const scheduledArr = fmtIsoTime(arrTemporal.scheduleAdvertised)
     || fmtIsoTime(arrTemporal.realtimeForecast)
     || fmtIsoTime(arrTemporal.realtimeActual);
@@ -383,9 +389,6 @@ async function handleApi(request, env) {
     const rttHeaders = { Authorization: `Bearer ${accessToken}`, Accept: "application/json" };
 
     if (to) {
-      // Dual-board approach: query departures from 'from' AND arrivals at 'to' in parallel.
-      // RTT's filterTo parameter misses through-services (trains where the destination
-      // is not the terminus). Cross-referencing by serviceUid catches them.
       const [depsResp, arrsResp] = await Promise.all([
         fetch(rttUrl(from, null, time), { headers: rttHeaders }),
         fetch(rttUrl(to, null, time, 'arrivals'), { headers: rttHeaders }),
@@ -404,36 +407,37 @@ async function handleApi(request, env) {
       const depServices = depsData.services || [];
       const arrServices = arrsData.services || [];
 
-      // Build lookup: serviceUid → arrival-board service
       const arrByUid = {};
       for (const s of arrServices) {
         const uid = s.scheduleMetadata?.uniqueIdentity;
         if (uid) arrByUid[uid] = s;
       }
 
-      // Keep only departures that also appear in the arrivals board at destination
       const matched = depServices.filter(s => {
         const uid = s.scheduleMetadata?.uniqueIdentity;
         return uid && arrByUid[uid];
       });
 
-      const services = matched.slice(0, 20).map(s => {
+      const services = matched.slice(0, 10).map(s => {
         const uid = s.scheduleMetadata?.uniqueIdentity;
         return mapServiceWithArr(s, arrByUid[uid]);
       });
+
+      const lastDep = services.length > 0 ? services[services.length - 1].scheduledDep : null;
 
       return new Response(
         JSON.stringify({
           from: depsData.query?.location?.description || from,
           fromCrs: from.toUpperCase(),
           services,
+          nextTimeFrom: nextHHMM(lastDep),
           generatedAt: new Date().toISOString(),
         }),
         { headers: { "Content-Type": "application/json" } }
       );
     }
 
-    // No destination specified - return all departures from 'from'
+    // No destination - return all departures from 'from'
     const resp = await fetch(rttUrl(from, null, time), { headers: rttHeaders });
     if (!resp.ok) {
       const body = await resp.text();
@@ -443,13 +447,15 @@ async function handleApi(request, env) {
       );
     }
     const data = await resp.json();
-    const services = (data.services || []).slice(0, 20).map(mapService);
+    const services = (data.services || []).slice(0, 10).map(mapService);
+    const lastDep = services.length > 0 ? services[services.length - 1].scheduledDep : null;
 
     return new Response(
       JSON.stringify({
         from: data.query?.location?.description || from,
         fromCrs: from.toUpperCase(),
         services,
+        nextTimeFrom: nextHHMM(lastDep),
         generatedAt: new Date().toISOString(),
       }),
       { headers: { "Content-Type": "application/json" } }
@@ -462,8 +468,7 @@ async function handleApi(request, env) {
   }
 }
 
-// Last train of the day - queries late-evening slots and returns the latest service found.
-// Tries 22:00, 21:00, 20:00 until a result is found (covers most lines).
+// Last train of the day
 async function handleLastTrain(request, env) {
   const url = new URL(request.url);
   const from = url.searchParams.get("from");
@@ -486,7 +491,6 @@ async function handleLastTrain(request, env) {
   try {
     const accessToken = await getRttAccessToken(env);
 
-    // Try progressively earlier query times until we find services
     const trialTimes = ["2200", "2100", "2000", "1900"];
     let lastService = null;
 
@@ -499,7 +503,6 @@ async function handleLastTrain(request, env) {
       const data = await resp.json();
       const svcs = data.services || [];
       if (svcs.length > 0) {
-        // Take the last service in this window - it's the latest known train
         lastService = mapService(svcs[svcs.length - 1]);
         break;
       }
@@ -512,6 +515,86 @@ async function handleLastTrain(request, env) {
   } catch (err) {
     return new Response(
       JSON.stringify({ error: "Failed to fetch last train", detail: err.message }),
+      { status: 502, headers: { "Content-Type": "application/json" } }
+    );
+  }
+}
+
+// Fetch full calling points for a service by UID.
+async function handleService(request, env) {
+  const url = new URL(request.url);
+  const uid = url.searchParams.get("uid");
+
+  if (!uid) {
+    return new Response(JSON.stringify({ error: "Missing uid" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  if (!env.RTT_PORTAL_TOKEN) {
+    return new Response(
+      JSON.stringify({ error: "RTT credentials not configured" }),
+      { status: 503, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  try {
+    const accessToken = await getRttAccessToken(env);
+    const resp = await fetch(`https://data.rtt.io/rtt/service/${encodeURIComponent(uid)}`, {
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+    });
+
+    if (!resp.ok) {
+      const body = await resp.text();
+      return new Response(
+        JSON.stringify({ error: `RTT service error ${resp.status}`, detail: body }),
+        { status: resp.status, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    const data = await resp.json();
+
+    // RTT NG service endpoint returns { locations: [...] }
+    // Each location has temporalData and location metadata.
+    const rawLocs = data.locations || [];
+    const locations = rawLocs
+      .filter(loc => loc.isPublicCall !== false)
+      .map(loc => {
+        const fmtAny = v => {
+          if (!v) return null;
+          if (v.includes('T')) return fmtIsoTime(v);
+          return v; // already HH:MM
+        };
+        const name = loc.location?.description || loc.description || "";
+        const crs = loc.location?.crs || loc.crs || "";
+        const platform = loc.locationMetadata?.platform?.actual
+          || loc.locationMetadata?.platform?.planned
+          || loc.platform || "--";
+        return {
+          name,
+          crs,
+          scheduledArr: fmtAny(loc.temporalData?.arrival?.scheduleAdvertised || loc.scheduledArrival),
+          realtimeArr: fmtAny(loc.temporalData?.arrival?.realtimeForecast
+            || loc.temporalData?.arrival?.realtimeActual
+            || loc.realtimeArrival),
+          scheduledDep: fmtAny(loc.temporalData?.departure?.scheduleAdvertised || loc.scheduledDeparture),
+          realtimeDep: fmtAny(loc.temporalData?.departure?.realtimeForecast || loc.realtimeDeparture),
+          platform,
+          isPass: loc.isPass || false,
+          isOrigin: loc.isOrigin || false,
+          isDestination: loc.isDestination || false,
+        };
+      })
+      .filter(loc => loc.name);
+
+    return new Response(
+      JSON.stringify({ uid, locations, generatedAt: new Date().toISOString() }),
+      { headers: { "Content-Type": "application/json" } }
+    );
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ error: "Failed to fetch service details", detail: err.message }),
       { status: 502, headers: { "Content-Type": "application/json" } }
     );
   }
@@ -801,7 +884,13 @@ function handleHtml() {
       vertical-align: middle;
     }
 
+    tr.service-row { cursor: pointer; }
+    tr.service-row:hover td { background: rgba(79,110,247,0.06); }
+    tr.service-row.expanded td { background: rgba(79,110,247,0.08); }
+
     tr:nth-child(even) td { background: rgba(255,255,255,0.015); }
+    tr.service-row:nth-child(even):hover td,
+    tr.service-row:nth-child(even).expanded td { background: rgba(79,110,247,0.08); }
 
     .dep-time {
       font-variant-numeric: tabular-nums;
@@ -853,6 +942,14 @@ function handleHtml() {
       font-weight: 500;
     }
 
+    .expand-hint {
+      font-size: 0.7rem;
+      color: var(--accent);
+      opacity: 0.7;
+      display: block;
+      margin-top: 3px;
+    }
+
     .status-on-time { color: var(--green); font-size: 0.8rem; }
     .status-late { color: var(--amber); font-size: 0.8rem; }
     .status-cancelled { color: var(--red); font-size: 0.8rem; }
@@ -890,6 +987,96 @@ function handleHtml() {
     }
 
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Calling points expansion row */
+    tr.calling-points-row td {
+      padding: 0;
+      border-top: none;
+    }
+
+    .calling-points-inner {
+      padding: 12px 14px 14px 28px;
+      background: rgba(79,110,247,0.04);
+      border-top: 1px dashed var(--border);
+    }
+
+    .calling-points-inner .cp-title {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+
+    .cp-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+
+    .cp-stop {
+      display: grid;
+      grid-template-columns: 70px 1fr 60px;
+      align-items: center;
+      padding: 4px 0;
+      font-size: 0.8125rem;
+      border-bottom: 1px solid rgba(46,50,72,0.5);
+      gap: 8px;
+    }
+
+    .cp-stop:last-child { border-bottom: none; }
+
+    .cp-time {
+      font-variant-numeric: tabular-nums;
+      font-size: 0.8rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .cp-time .cp-late { color: var(--amber); font-size: 0.7rem; display: block; }
+
+    .cp-name { font-size: 0.8125rem; }
+    .cp-name.is-origin { font-weight: 600; color: var(--accent); }
+    .cp-name.is-destination { font-weight: 600; color: var(--green); }
+
+    .cp-plat {
+      font-size: 0.75rem;
+      color: var(--muted);
+      text-align: right;
+    }
+
+    .cp-loading {
+      font-size: 0.8rem;
+      color: var(--muted);
+      padding: 8px 0;
+    }
+
+    .cp-error {
+      font-size: 0.8rem;
+      color: var(--red);
+      padding: 8px 0;
+    }
+
+    /* Show-more button */
+    .btn-show-more {
+      display: block;
+      width: 100%;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-top: none;
+      border-radius: 0 0 var(--radius) var(--radius);
+      color: var(--muted);
+      font-size: 0.8125rem;
+      padding: 10px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .btn-show-more:hover {
+      background: var(--surface2);
+      color: var(--text);
+    }
 
     /* Last train banner */
     .last-train-banner {
@@ -991,7 +1178,6 @@ function handleHtml() {
         min-width: unset;
         white-space: normal;
       }
-      /* On mobile: times take full width (own row), controls sit beneath */
       .saved-times {
         width: 100%;
         flex: none;
@@ -1047,7 +1233,6 @@ function handleHtml() {
     .saved-train-chip.cancelled { border-color: #991b1b; background: #1c0909; color: #fca5a5; text-decoration: line-through; }
     .saved-train-chip .plat { color: var(--muted); font-size: 0.75rem; }
 
-    /* Last train chip in saved panel */
     .saved-last-chip {
       background: rgba(167,139,250,0.1);
       border: 1px solid rgba(167,139,250,0.3);
@@ -1306,6 +1491,158 @@ function handleHtml() {
   setupAutocomplete('from-input', 'from-list', 'from-crs');
   setupAutocomplete('to-input', 'to-list', 'to-crs');
 
+  // ── Calling points ────────────────────────────────────────────────────────
+  // Track which rows are expanded so we can toggle them
+  const expandedUids = new Set();
+
+  async function toggleCallingPoints(uid, tbodyEl, trEl) {
+    // Find or remove existing expansion row
+    const existingExpRow = tbodyEl.querySelector(\`tr[data-cp-uid="\${uid}"]\`);
+    if (existingExpRow) {
+      existingExpRow.remove();
+      trEl.classList.remove('expanded');
+      expandedUids.delete(uid);
+      return;
+    }
+
+    trEl.classList.add('expanded');
+    expandedUids.add(uid);
+
+    // Insert a placeholder row immediately after this row
+    const colCount = trEl.cells.length;
+    const expRow = document.createElement('tr');
+    expRow.className = 'calling-points-row';
+    expRow.dataset.cpUid = uid;
+    const td = document.createElement('td');
+    td.colSpan = colCount;
+    td.innerHTML = \`<div class="calling-points-inner"><div class="cp-loading">Loading calling points...</div></div>\`;
+    expRow.appendChild(td);
+    trEl.insertAdjacentElement('afterend', expRow);
+
+    try {
+      const resp = await fetch(\`/api/service?uid=\${encodeURIComponent(uid)}\`);
+      const data = await resp.json();
+
+      if (!expandedUids.has(uid)) return; // collapsed while loading
+
+      if (data.error || !data.locations || !data.locations.length) {
+        td.innerHTML = \`<div class="calling-points-inner"><div class="cp-error">Calling points unavailable: \${data.error || 'no stops returned'}</div></div>\`;
+        return;
+      }
+
+      const stops = data.locations.filter(loc => !loc.isPass);
+      const stopsHtml = stops.map(loc => {
+        const time = loc.scheduledArr || loc.scheduledDep || '--';
+        const lateTime = (loc.realtimeArr && loc.realtimeArr !== loc.scheduledArr)
+          ? loc.realtimeArr
+          : (loc.realtimeDep && loc.realtimeDep !== loc.scheduledDep ? loc.realtimeDep : null);
+        const lateHtml = lateTime ? \`<span class="cp-late">exp \${lateTime}</span>\` : '';
+        const nameCls = loc.isOrigin ? 'cp-name is-origin' : (loc.isDestination ? 'cp-name is-destination' : 'cp-name');
+        const platText = loc.platform && loc.platform !== '--' ? \`Plat \${loc.platform}\` : '';
+        return \`<div class="cp-stop">
+          <div class="cp-time">\${time}\${lateHtml}</div>
+          <div class="\${nameCls}">\${loc.name}</div>
+          <div class="cp-plat">\${platText}</div>
+        </div>\`;
+      }).join('');
+
+      td.innerHTML = \`<div class="calling-points-inner">
+        <div class="cp-title">All calling points</div>
+        <div class="cp-list">\${stopsHtml}</div>
+      </div>\`;
+    } catch (err) {
+      if (expandedUids.has(uid)) {
+        td.innerHTML = \`<div class="calling-points-inner"><div class="cp-error">Could not load calling points</div></div>\`;
+      }
+    }
+  }
+
+  // ── Show more ─────────────────────────────────────────────────────────────
+  async function loadMoreServices(from, to, timeFrom, tbodyEl, btnEl) {
+    btnEl.textContent = 'Loading...';
+    btnEl.disabled = true;
+
+    const params = new URLSearchParams({ from, time: timeFrom });
+    if (to) params.set('to', to);
+
+    try {
+      const resp = await fetch(\`/api/trains?\${params}\`);
+      const data = await resp.json();
+
+      if (data.error || !data.services || !data.services.length) {
+        btnEl.textContent = 'No more services';
+        btnEl.disabled = true;
+        return;
+      }
+
+      const toLabel = document.getElementById('to-input').value.trim();
+      const isFiltered = !!to;
+
+      data.services.forEach(s => {
+        const tr = buildServiceRow(s, isFiltered, toLabel, tbodyEl);
+        tbodyEl.appendChild(tr);
+      });
+
+      if (data.nextTimeFrom) {
+        btnEl.dataset.nextTime = data.nextTimeFrom;
+        btnEl.textContent = 'Show more';
+        btnEl.disabled = false;
+      } else {
+        btnEl.textContent = 'No more services';
+        btnEl.disabled = true;
+      }
+    } catch (err) {
+      btnEl.textContent = 'Error loading more';
+      btnEl.disabled = false;
+    }
+  }
+
+  // ── Build a single result <tr> ────────────────────────────────────────────
+  function buildServiceRow(s, isFiltered, toLabel, tbodyEl) {
+    const cancelled = s.cancelled;
+    const depStatus = statusLabel(s.scheduledDep, s.realtimeDep, cancelled);
+    const arrStatus = s.scheduledArr ? statusLabel(s.scheduledArr, s.realtimeArr, cancelled) : null;
+
+    const durBadge = (isFiltered && s.duration)
+      ? \`<span class="duration-badge">\${s.duration}</span>\`
+      : '';
+
+    const finalDestCell = (isFiltered && s.finalDestination && s.finalDestination !== toLabel)
+      ? \`<span class="final-dest">to <strong>\${s.finalDestination}</strong></span>\`
+      : '';
+
+    const destText = s.destinations.map(d => d.time ? \`\${d.name} (\${d.time})\` : d.name).join(', ');
+
+    const expandHint = \`<span class="expand-hint">tap for stops</span>\`;
+
+    const tr = document.createElement('tr');
+    tr.className = 'service-row';
+    tr.dataset.uid = s.uid;
+
+    tr.innerHTML = \`
+      <td>
+        <div class="dep-time">\${s.scheduledDep}</div>
+        \${depStatus.html}
+        \${expandHint}
+      </td>
+      \${isFiltered ? \`<td>
+        <div class="arr-time">\${s.scheduledArr || '--'}</div>
+        \${arrStatus ? arrStatus.html : ''}
+        \${durBadge}
+        \${finalDestCell}
+      </td>\` : \`<td><div class="dest-list">\${destText || '--'}</div></td>\`}
+      <td class="platform">\${s.platform}</td>
+      <td class="\${depStatus.cls}">\${depStatus.label}</td>
+      <td class="operator">\${s.operator}</td>
+    \`;
+
+    if (s.uid) {
+      tr.addEventListener('click', () => toggleCallingPoints(s.uid, tbodyEl, tr));
+    }
+
+    return tr;
+  }
+
   // ── Search ────────────────────────────────────────────────────────────────
   const resultsEl = document.getElementById('results');
 
@@ -1323,7 +1660,6 @@ function handleHtml() {
     const from = fromCrs || fromName.slice(0, 3).toUpperCase();
     const to = toCrs || (toName ? toName.slice(0, 3).toUpperCase() : '');
 
-    const dateVal = document.getElementById('date-input').value;
     const timeVal = document.getElementById('time-input').value.replace(':', '');
 
     const params = new URLSearchParams({ from });
@@ -1337,9 +1673,9 @@ function handleHtml() {
       </div>\`;
 
     document.getElementById('btn-search').disabled = true;
+    expandedUids.clear();
 
     try {
-      // Fetch departures and (if to is set) last train in parallel
       const fetchDeps = fetch(\`/api/trains?\${params}\`).then(r => r.json());
       const fetchLast = (from && to)
         ? fetch(\`/api/last-train?from=\${encodeURIComponent(from)}&to=\${encodeURIComponent(to)}\`).then(r => r.json()).catch(() => null)
@@ -1355,7 +1691,7 @@ function handleHtml() {
         return;
       }
 
-      renderResults(data, fromName || from, toName || to, dateVal, timeVal, lastData);
+      renderResults(data, from, to, fromName || from, toName || to, timeVal, lastData);
 
       if (from && to) {
         const alreadySaved = getSavedJourneys().some(j => j.from === from && j.to === to);
@@ -1386,7 +1722,7 @@ function handleHtml() {
     }
   }
 
-  function renderResults(data, fromLabel, toLabel, dateVal, timeVal, lastData) {
+  function renderResults(data, from, to, fromLabel, toLabel, timeVal, lastData) {
     if (!data.services || !data.services.length) {
       resultsEl.innerHTML = \`
         <div class="results-header">
@@ -1398,65 +1734,49 @@ function handleHtml() {
     }
 
     const heading = toLabel ? \`\${data.from} → \${toLabel}\` : \`Departures from \${data.from}\`;
-    const timeDisplay = formatDisplayTime(dateVal, timeVal);
-
-    const rows = data.services.map(s => {
-      const cancelled = s.cancelled;
-      const depStatus = statusLabel(s.scheduledDep, s.realtimeDep, cancelled);
-      const arrStatus = s.scheduledArr ? statusLabel(s.scheduledArr, s.realtimeArr, cancelled) : null;
-
-      // Duration badge (shown when filtering to a destination)
-      const durBadge = (toLabel && s.duration)
-        ? \`<span class="duration-badge">\${s.duration}</span>\`
-        : '';
-
-      // Final destination (the train's terminus, not the filtered-to stop)
-      const finalDestCell = (toLabel && s.finalDestination && s.finalDestination !== toLabel)
-        ? \`<span class="final-dest">to <strong>\${s.finalDestination}</strong></span>\`
-        : '';
-
-      const destText = s.destinations.map(d => d.time ? \`\${d.name} (\${d.time})\` : d.name).join(', ');
-
-      return \`<tr>
-        <td>
-          <div class="dep-time">\${s.scheduledDep}</div>
-          \${depStatus.html}
-        </td>
-        \${toLabel ? \`<td>
-          <div class="arr-time">\${s.scheduledArr || '--'}</div>
-          \${arrStatus ? arrStatus.html : ''}
-          \${durBadge}
-          \${finalDestCell}
-        </td>\` : \`<td><div class="dest-list">\${destText || '--'}</div></td>\`}
-        <td class="platform">\${s.platform}</td>
-        <td class="\${depStatus.cls}">\${depStatus.label}</td>
-        <td class="operator">\${s.operator}</td>
-      </tr>\`;
-    }).join('');
-
-    const toCol = toLabel ? '<th>Arrives · Duration · To</th>' : '<th>Destination</th>';
+    const timeDisplay = formatDisplayTime(timeVal);
+    const isFiltered = !!to;
 
     resultsEl.innerHTML = \`
       <div class="results-header">
         <h2>\${heading}</h2>
         <span class="meta">\${timeDisplay} &middot; \${data.services.length} service\${data.services.length !== 1 ? 's' : ''}</span>
       </div>
-      <div class="table-wrap">
-        <table>
+      <div class="table-wrap" id="results-table-wrap">
+        <table id="results-table">
           <thead>
             <tr>
               <th>Departs</th>
-              \${toCol}
+              \${isFiltered ? '<th>Arrives · Duration · To</th>' : '<th>Destination</th>'}
               <th>Plat</th>
               <th>Status</th>
               <th>Operator</th>
             </tr>
           </thead>
-          <tbody>\${rows}</tbody>
+          <tbody id="results-tbody"></tbody>
         </table>
       </div>\`;
 
-    // Last train banner (only when filtering to a destination)
+    const tbodyEl = document.getElementById('results-tbody');
+
+    data.services.forEach(s => {
+      tbodyEl.appendChild(buildServiceRow(s, isFiltered, toLabel, tbodyEl));
+    });
+
+    // Show-more button
+    if (data.nextTimeFrom) {
+      const tableWrap = document.getElementById('results-table-wrap');
+      const showMoreBtn = document.createElement('button');
+      showMoreBtn.className = 'btn-show-more';
+      showMoreBtn.textContent = 'Show more departures';
+      showMoreBtn.dataset.nextTime = data.nextTimeFrom;
+      showMoreBtn.addEventListener('click', function() {
+        loadMoreServices(from, to, this.dataset.nextTime, tbodyEl, this);
+      });
+      tableWrap.insertAdjacentElement('afterend', showMoreBtn);
+    }
+
+    // Last train banner
     if (toLabel && lastData && lastData.lastService) {
       const ls = lastData.lastService;
       const durStr = ls.duration ? \` &middot; \${ls.duration}\` : '';
@@ -1490,14 +1810,13 @@ function handleHtml() {
     return { label: 'On time', cls: 'status-on-time', html: '' };
   }
 
-  function formatDisplayTime(dateVal, timeVal) {
-    if (!dateVal) return 'Now';
+  function formatDisplayTime(timeVal) {
+    if (!timeVal) return 'Now';
     try {
-      const d = new Date(\`\${dateVal}T\${timeVal.slice(0,2)}:\${timeVal.slice(2) || '00'}:00\`);
-      return d.toLocaleString('en-GB', {
-        weekday: 'short', day: 'numeric', month: 'short',
-        hour: '2-digit', minute: '2-digit',
-      });
+      const hh = timeVal.slice(0, 2);
+      const mm = timeVal.slice(2) || '00';
+      const now = new Date();
+      return \`\${now.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })} \${hh}:\${mm}\`;
     } catch { return 'Now'; }
   }
 
@@ -1634,7 +1953,6 @@ function handleHtml() {
       btn.addEventListener('click', () => removeJourney(btn.dataset.id));
     });
 
-    // Fetch live times AND last train for each journey in parallel
     const results = await Promise.all(journeys.map(async j => ({
       svcs: await fetchSavedTimes(j.from, j.to),
       last: await fetchLastTrain(j.from, j.to),
@@ -1682,6 +2000,10 @@ export default {
 
     if (url.pathname === "/api/last-train") {
       return handleLastTrain(request, env);
+    }
+
+    if (url.pathname === "/api/service") {
+      return handleService(request, env);
     }
 
     if (url.pathname === "/api/stations") {
