@@ -262,6 +262,15 @@ function fmtDuration(mins) {
   return m === 0 ? `${h}h` : `${h}h ${m}m`;
 }
 
+// Return true only when actual is strictly later than scheduled (a real delay).
+// Returns false for early arrivals, on-time, or missing values.
+function isDelayed(sched, actual) {
+  if (!sched || !actual || sched === actual) return false;
+  const s = parseInt(sched.replace(':', ''), 10);
+  const a = parseInt(actual.replace(':', ''), 10);
+  return a > s;
+}
+
 // Return the next HHMM string (HH:MM dep time + 1 minute) for show-more pagination.
 function nextHHMM(hhmmStr) {
   if (!hhmmStr) return null;
@@ -1058,6 +1067,44 @@ function handleHtml() {
       padding: 8px 0;
     }
 
+    /* Stop count badge - appears in dep cell once calling points load */
+    .stop-count-badge {
+      display: inline-block;
+      font-size: 0.7rem;
+      color: var(--accent);
+      background: rgba(79,110,247,0.1);
+      border: 1px solid rgba(79,110,247,0.25);
+      border-radius: 4px;
+      padding: 1px 5px;
+      margin-top: 3px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Clickable chip in saved panel */
+    .saved-chip-clickable { cursor: pointer; transition: opacity 0.15s; }
+    .saved-chip-clickable:hover { opacity: 0.8; }
+    .saved-chip-clickable.chip-expanded { outline: 1px solid var(--accent); }
+
+    /* Inline calling points expand below a saved journey row */
+    .saved-chip-expand {
+      width: 100%;
+      padding: 0 0 4px;
+    }
+
+    /* Show-more in saved panel */
+    .btn-saved-show-more {
+      background: transparent;
+      border: 1px dashed var(--border);
+      border-radius: 6px;
+      color: var(--muted);
+      font-size: 0.75rem;
+      padding: 4px 10px;
+      cursor: pointer;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .btn-saved-show-more:hover { background: var(--surface2); color: var(--text); }
+
     /* Show-more button */
     .btn-show-more {
       display: block;
@@ -1495,7 +1542,7 @@ function handleHtml() {
   // Track which rows are expanded so we can toggle them
   const expandedUids = new Set();
 
-  async function toggleCallingPoints(uid, tbodyEl, trEl) {
+  async function toggleCallingPoints(uid, fromCrs, toCrs, tbodyEl, trEl) {
     // Find or remove existing expansion row
     const existingExpRow = tbodyEl.querySelector(\`tr[data-cp-uid="\${uid}"]\`);
     if (existingExpRow) {
@@ -1531,11 +1578,26 @@ function handleHtml() {
       }
 
       const stops = data.locations.filter(loc => !loc.isPass);
+
+      // Compute stop count between user's from and to stations
+      let stopCountHtml = '';
+      if (fromCrs && toCrs) {
+        const fIdx = stops.findIndex(loc => loc.crs && loc.crs.toUpperCase() === fromCrs.toUpperCase());
+        const tIdx = stops.findIndex(loc => loc.crs && loc.crs.toUpperCase() === toCrs.toUpperCase());
+        if (fIdx >= 0 && tIdx > fIdx) {
+          const count = tIdx - fIdx;
+          stopCountHtml = \` · \${count} stop\${count !== 1 ? 's' : ''}\`;
+          const badge = trEl.querySelector('.stop-count-badge');
+          if (badge) { badge.textContent = \`\${count} stop\${count !== 1 ? 's' : ''}\`; badge.style.display = ''; }
+        }
+      }
+
       const stopsHtml = stops.map(loc => {
         const time = loc.scheduledArr || loc.scheduledDep || '--';
-        const lateTime = (loc.realtimeArr && loc.realtimeArr !== loc.scheduledArr)
+        // Only show exp when the train is actually late (not early arrivals)
+        const lateTime = isDelayed(loc.scheduledArr, loc.realtimeArr)
           ? loc.realtimeArr
-          : (loc.realtimeDep && loc.realtimeDep !== loc.scheduledDep ? loc.realtimeDep : null);
+          : (isDelayed(loc.scheduledDep, loc.realtimeDep) ? loc.realtimeDep : null);
         const lateHtml = lateTime ? \`<span class="cp-late">exp \${lateTime}</span>\` : '';
         const nameCls = loc.isOrigin ? 'cp-name is-origin' : (loc.isDestination ? 'cp-name is-destination' : 'cp-name');
         const platText = loc.platform && loc.platform !== '--' ? \`Plat \${loc.platform}\` : '';
@@ -1547,7 +1609,7 @@ function handleHtml() {
       }).join('');
 
       td.innerHTML = \`<div class="calling-points-inner">
-        <div class="cp-title">All calling points</div>
+        <div class="cp-title">All calling points\${stopCountHtml}</div>
         <div class="cp-list">\${stopsHtml}</div>
       </div>\`;
     } catch (err) {
@@ -1579,7 +1641,7 @@ function handleHtml() {
       const isFiltered = !!to;
 
       data.services.forEach(s => {
-        const tr = buildServiceRow(s, isFiltered, toLabel, tbodyEl);
+        const tr = buildServiceRow(s, isFiltered, toLabel, from, to, tbodyEl);
         tbodyEl.appendChild(tr);
       });
 
@@ -1598,7 +1660,7 @@ function handleHtml() {
   }
 
   // ── Build a single result <tr> ────────────────────────────────────────────
-  function buildServiceRow(s, isFiltered, toLabel, tbodyEl) {
+  function buildServiceRow(s, isFiltered, toLabel, fromCrs, toCrs, tbodyEl) {
     const cancelled = s.cancelled;
     const depStatus = statusLabel(s.scheduledDep, s.realtimeDep, cancelled);
     const arrStatus = s.scheduledArr ? statusLabel(s.scheduledArr, s.realtimeArr, cancelled) : null;
@@ -1624,6 +1686,7 @@ function handleHtml() {
         <div class="dep-time">\${s.scheduledDep}</div>
         \${depStatus.html}
         \${expandHint}
+        <span class="stop-count-badge" style="display:none"></span>
       </td>
       \${isFiltered ? \`<td>
         <div class="arr-time">\${s.scheduledArr || '--'}</div>
@@ -1637,7 +1700,7 @@ function handleHtml() {
     \`;
 
     if (s.uid) {
-      tr.addEventListener('click', () => toggleCallingPoints(s.uid, tbodyEl, tr));
+      tr.addEventListener('click', () => toggleCallingPoints(s.uid, fromCrs, toCrs, tbodyEl, tr));
     }
 
     return tr;
@@ -1760,7 +1823,7 @@ function handleHtml() {
     const tbodyEl = document.getElementById('results-tbody');
 
     data.services.forEach(s => {
-      tbodyEl.appendChild(buildServiceRow(s, isFiltered, toLabel, tbodyEl));
+      tbodyEl.appendChild(buildServiceRow(s, isFiltered, toLabel, from, to, tbodyEl));
     });
 
     // Show-more button
@@ -1865,14 +1928,83 @@ function handleHtml() {
     renderSavedPanel();
   }
 
-  async function fetchSavedTimes(from, to) {
+  async function fetchSavedTimes(from, to, timeFrom) {
     try {
       const params = new URLSearchParams({ from, to });
+      if (timeFrom) params.set('time', timeFrom);
       const resp = await fetch(\`/api/trains?\${params}\`);
       if (!resp.ok) return null;
       const data = await resp.json();
-      return data.services ? data.services.slice(0, 3) : null;
+      return data;
     } catch { return null; }
+  }
+
+  // Toggle calling points in a saved journey's expand area (not a table row)
+  const expandedSavedUids = new Set();
+  async function toggleSavedCallingPoints(uid, fromCrs, toCrs, expandEl, chipEl) {
+    if (expandedSavedUids.has(uid)) {
+      expandedSavedUids.delete(uid);
+      chipEl.classList.remove('chip-expanded');
+      expandEl.innerHTML = '';
+      expandEl.style.display = 'none';
+      return;
+    }
+    // Collapse any currently expanded chip in this panel
+    expandedSavedUids.forEach(u => expandedSavedUids.delete(u));
+    expandEl.querySelectorAll && expandEl.parentElement.querySelectorAll('.chip-expanded').forEach(el => el.classList.remove('chip-expanded'));
+
+    expandedSavedUids.add(uid);
+    chipEl.classList.add('chip-expanded');
+    expandEl.style.display = '';
+    expandEl.innerHTML = \`<div class="calling-points-inner"><div class="cp-loading">Loading calling points...</div></div>\`;
+
+    try {
+      const resp = await fetch(\`/api/service?uid=\${encodeURIComponent(uid)}\`);
+      const data = await resp.json();
+
+      if (!expandedSavedUids.has(uid)) return;
+
+      if (data.error || !data.locations || !data.locations.length) {
+        expandEl.innerHTML = \`<div class="calling-points-inner"><div class="cp-error">Calling points unavailable</div></div>\`;
+        return;
+      }
+
+      const stops = data.locations.filter(loc => !loc.isPass);
+
+      let stopCountHtml = '';
+      if (fromCrs && toCrs) {
+        const fIdx = stops.findIndex(loc => loc.crs && loc.crs.toUpperCase() === fromCrs.toUpperCase());
+        const tIdx = stops.findIndex(loc => loc.crs && loc.crs.toUpperCase() === toCrs.toUpperCase());
+        if (fIdx >= 0 && tIdx > fIdx) {
+          const count = tIdx - fIdx;
+          stopCountHtml = \` · \${count} stop\${count !== 1 ? 's' : ''}\`;
+        }
+      }
+
+      const stopsHtml = stops.map(loc => {
+        const time = loc.scheduledArr || loc.scheduledDep || '--';
+        const lateTime = isDelayed(loc.scheduledArr, loc.realtimeArr)
+          ? loc.realtimeArr
+          : (isDelayed(loc.scheduledDep, loc.realtimeDep) ? loc.realtimeDep : null);
+        const lateHtml = lateTime ? \`<span class="cp-late">exp \${lateTime}</span>\` : '';
+        const nameCls = loc.isOrigin ? 'cp-name is-origin' : (loc.isDestination ? 'cp-name is-destination' : 'cp-name');
+        const platText = loc.platform && loc.platform !== '--' ? \`Plat \${loc.platform}\` : '';
+        return \`<div class="cp-stop">
+          <div class="cp-time">\${time}\${lateHtml}</div>
+          <div class="\${nameCls}">\${loc.name}</div>
+          <div class="cp-plat">\${platText}</div>
+        </div>\`;
+      }).join('');
+
+      expandEl.innerHTML = \`<div class="calling-points-inner">
+        <div class="cp-title">All calling points\${stopCountHtml}</div>
+        <div class="cp-list">\${stopsHtml}</div>
+      </div>\`;
+    } catch {
+      if (expandedSavedUids.has(uid)) {
+        expandEl.innerHTML = \`<div class="calling-points-inner"><div class="cp-error">Could not load calling points</div></div>\`;
+      }
+    }
   }
 
   async function fetchLastTrain(from, to) {
@@ -1884,19 +2016,22 @@ function handleHtml() {
     } catch { return null; }
   }
 
-  function renderChip(svc) {
+  function renderChip(svc, uid, fromCrs, toCrs, expandId) {
     const dep = svc.scheduledDep || '--';
-    const depDelay = (svc.realtimeDep && svc.realtimeDep !== svc.scheduledDep) ? \` (exp \${svc.realtimeDep})\` : '';
+    // Only show expected time if the train is actually delayed (not early)
+    const depDelay = isDelayed(svc.scheduledDep, svc.realtimeDep) ? \` (exp \${svc.realtimeDep})\` : '';
     const arr = svc.scheduledArr ? \` → \${svc.scheduledArr}\` : '';
-    const arrDelay = (svc.scheduledArr && svc.realtimeArr && svc.realtimeArr !== svc.scheduledArr) ? \` (exp \${svc.realtimeArr})\` : '';
+    const arrDelay = isDelayed(svc.scheduledArr, svc.realtimeArr) ? \` (exp \${svc.realtimeArr})\` : '';
     const plat = svc.platform && svc.platform !== '--' ? \` · Plat \${svc.platform}\` : '';
     const durStr = svc.duration ? svc.duration : '';
     const finalDestStr = svc.finalDestination ? \`to \${svc.finalDestination}\` : '';
     let cls = 'saved-train-chip';
     if (svc.cancelled) cls += ' cancelled';
-    else if (svc.realtimeDep && svc.realtimeDep !== svc.scheduledDep) cls += ' late';
+    else if (isDelayed(svc.scheduledDep, svc.realtimeDep)) cls += ' late';
     else cls += ' on-time';
-    return \`<div class="\${cls}">
+    const uidAttr = uid ? \` data-uid="\${uid}" data-from="\${fromCrs||''}" data-to="\${toCrs||''}" data-expand="\${expandId||''}"\` : '';
+    const clickable = uid ? ' saved-chip-clickable' : '';
+    return \`<div class="\${cls}\${clickable}"\${uidAttr}>
       <div class="chip-main"><span>\${dep}\${depDelay}\${arr}\${arrDelay}</span><span class="plat">\${plat}</span></div>
       \${durStr ? \`<span class="chip-dur">\${durStr}\${finalDestStr ? \` · \${finalDestStr}\` : ''}</span>\` : (finalDestStr ? \`<span class="chip-final-dest">\${finalDestStr}</span>\` : '')}
     </div>\`;
@@ -1908,6 +2043,44 @@ function handleHtml() {
       <span class="lbl">Last train</span>
       <strong>\${ls.scheduledDep}</strong>\${ls.duration ? \` · \${ls.duration}\` : ''}
     </div>\`;
+  }
+
+  // Append chips (and show-more button) to a saved journey's times element.
+  function populateSavedTimes(timesEl, expandEl, svcs, nextTimeFrom, fromCrs, toCrs, jId) {
+    // Remove any existing show-more button before appending
+    const oldBtn = timesEl.querySelector('.btn-saved-show-more');
+    if (oldBtn) oldBtn.remove();
+
+    const expandId = \`sj-expand-\${jId}\`;
+    svcs.slice(0, 3).forEach(svc => {
+      const uid = svc.uid;
+      const chipHtml = renderChip(svc, uid, fromCrs, toCrs, expandId);
+      const wrapper = document.createElement('div');
+      wrapper.innerHTML = chipHtml;
+      const chipEl = wrapper.firstElementChild;
+      if (uid) {
+        chipEl.addEventListener('click', () => toggleSavedCallingPoints(uid, fromCrs, toCrs, expandEl, chipEl));
+      }
+      timesEl.appendChild(chipEl);
+    });
+
+    if (nextTimeFrom) {
+      const btn = document.createElement('button');
+      btn.className = 'btn-saved-show-more';
+      btn.textContent = 'more';
+      btn.dataset.nextTime = nextTimeFrom;
+      btn.addEventListener('click', async function() {
+        btn.textContent = '...';
+        btn.disabled = true;
+        const data = await fetchSavedTimes(fromCrs, toCrs, this.dataset.nextTime);
+        if (data && data.services && data.services.length) {
+          populateSavedTimes(timesEl, expandEl, data.services, data.nextTimeFrom, fromCrs, toCrs, jId);
+        } else {
+          btn.remove();
+        }
+      });
+      timesEl.appendChild(btn);
+    }
   }
 
   async function renderSavedPanel() {
@@ -1924,15 +2097,17 @@ function handleHtml() {
     const note = document.getElementById('saved-refresh-note');
     note.textContent = 'Refreshing...';
 
+    // Build skeleton rows (label + empty times + controls + expand area)
     list.innerHTML = journeys.map(j => \`
       <div class="saved-journey-row" id="sj-\${j.id}">
         <div class="saved-route-label">\${j.fromName} → \${j.toName}</div>
-        <div class="saved-times"><span class="saved-loading">Loading...</span></div>
+        <div class="saved-times" id="sj-times-\${j.id}"><span class="saved-loading">Loading...</span></div>
         <div class="saved-controls">
           <button class="btn-saved-search" data-from="\${j.from}" data-from-name="\${encodeURIComponent(j.fromName)}" data-to="\${j.to}" data-to-name="\${encodeURIComponent(j.toName)}">Search</button>
           <button class="btn-remove-journey" data-id="\${j.id}">✕</button>
         </div>
-      </div>\`).join('');
+      </div>
+      <div class="saved-chip-expand" id="sj-expand-\${j.id}" style="display:none"></div>\`).join('');
 
     list.querySelectorAll('.btn-saved-search').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -1954,7 +2129,7 @@ function handleHtml() {
     });
 
     const results = await Promise.all(journeys.map(async j => ({
-      svcs: await fetchSavedTimes(j.from, j.to),
+      data: await fetchSavedTimes(j.from, j.to),
       last: await fetchLastTrain(j.from, j.to),
     })));
 
@@ -1962,18 +2137,25 @@ function handleHtml() {
     note.textContent = \`Updated \${now}\`;
 
     journeys.forEach((j, i) => {
-      const row = document.getElementById(\`sj-\${j.id}\`);
-      if (!row) return;
-      const timesEl = row.querySelector('.saved-times');
-      const { svcs, last } = results[i];
-      let html = '';
-      if (!svcs || !svcs.length) {
-        html = '<span class="saved-loading">No services found</span>';
+      const timesEl = document.getElementById(\`sj-times-\${j.id}\`);
+      const expandEl = document.getElementById(\`sj-expand-\${j.id}\`);
+      if (!timesEl) return;
+
+      const { data, last } = results[i];
+      timesEl.innerHTML = '';
+
+      if (!data || !data.services || !data.services.length) {
+        timesEl.innerHTML = '<span class="saved-loading">No services found</span>';
       } else {
-        html = svcs.map(renderChip).join('');
+        populateSavedTimes(timesEl, expandEl, data.services, data.nextTimeFrom, j.from, j.to, j.id);
       }
-      html += renderLastChip(last);
-      timesEl.innerHTML = html;
+
+      const lastChipHtml = renderLastChip(last);
+      if (lastChipHtml) {
+        const wrapper = document.createElement('div');
+        wrapper.innerHTML = lastChipHtml;
+        timesEl.appendChild(wrapper.firstElementChild);
+      }
     });
   }
 
