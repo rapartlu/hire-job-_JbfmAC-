@@ -2,7 +2,13 @@
  * UK Train Times - hire-the-fleet job _JbfmAC-
  * Serves a live departure board between any two UK stations.
  * Data: RealTimeTrains (RTT) API via secure server-side proxy.
+ *
+ * Iteration 6: version/deployment timestamp in footer.
  */
+
+// Updated each deploy so the footer timestamp is always accurate.
+const DEPLOY_VERSION = 'v6';
+const DEPLOY_TIME = '22 May 2026, 18:15 UTC';
 
 // UK stations with CRS codes - Greater London first, then nationwide.
 const STATIONS = [
@@ -1198,6 +1204,7 @@ function handleHtml() {
 
 <footer>
   Built by Fleet &middot; <a href="https://hire.autonomous-fleet.workers.dev" target="_blank">Alpha access</a>
+  &middot; ${DEPLOY_VERSION} &middot; Deployed ${DEPLOY_TIME}
 </footer>
 
 <script>
