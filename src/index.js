@@ -7,8 +7,8 @@
  */
 
 // Updated each deploy so the footer timestamp is always accurate.
-const DEPLOY_VERSION = 'v6';
-const DEPLOY_TIME = '22 May 2026, 18:15 UTC';
+const DEPLOY_VERSION = 'v7';
+const DEPLOY_TIME = '23 May 2026, 14:00 UTC';
 
 // UK stations with CRS codes - Greater London first, then nationwide.
 const STATIONS = [
@@ -558,6 +558,7 @@ function handleHtml() {
       --purple: #a78bfa;
       --radius: 8px;
       --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      color-scheme: dark;
     }
 
     body {
@@ -565,6 +566,7 @@ function handleHtml() {
       color: var(--text);
       font-family: var(--font);
       min-height: 100vh;
+      min-height: -webkit-fill-available;
       display: flex;
       flex-direction: column;
     }
@@ -656,17 +658,27 @@ function handleHtml() {
     }
 
     input[type="text"], input[type="time"], input[type="date"] {
+      -webkit-appearance: none;
+      appearance: none;
       background: var(--surface2);
       border: 1px solid var(--border);
       border-radius: 6px;
       color: var(--text);
       font-family: var(--font);
-      font-size: 0.9375rem;
+      /* 16px minimum prevents iOS Safari auto-zoom on focus */
+      font-size: 16px;
       padding: 10px 12px;
       width: 100%;
       outline: none;
       transition: border-color 0.15s;
     }
+
+    /* iOS Safari: force our colours onto date/time edit fields */
+    ::-webkit-datetime-edit { color: var(--text); }
+    ::-webkit-datetime-edit-fields-wrapper { color: var(--text); }
+    ::-webkit-datetime-edit-text { color: var(--muted); }
+    ::-webkit-calendar-picker-indicator { filter: invert(0.8); }
+    ::-webkit-date-and-time-value { color: var(--text); }
 
     input:focus {
       border-color: var(--accent);
@@ -1259,10 +1271,15 @@ function handleHtml() {
         li.dataset.name = item.name;
         li.innerHTML =
           \`<span>\${item.name}</span><span class="crs-badge">\${item.crs}</span>\`;
+        // mousedown for desktop; touchstart for iOS Safari (fires before blur)
         li.addEventListener('mousedown', (e) => {
           e.preventDefault();
           select(item);
         });
+        li.addEventListener('touchstart', (e) => {
+          e.preventDefault();
+          select(item);
+        }, { passive: false });
         list.appendChild(li);
       });
       list.hidden = false;
