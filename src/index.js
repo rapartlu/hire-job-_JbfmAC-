@@ -555,19 +555,42 @@ async function handleService(request, env) {
 
   try {
     const accessToken = await getRttAccessToken(env);
-    // uid format: "gb-nr:{serviceUid}:{YYYY-MM-DD}"
-    // Colons are valid URL path characters (RFC 3986 pchar) but encodeURIComponent encodes
-    // them as %3A, which the RTT NG API does not recognise. Build the URL without encoding.
-    const serviceUrl = `https://data.rtt.io/rtt/service/${uid}`;
-    const resp = await fetch(serviceUrl, {
-      headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
-    });
+    const rttHeaders = { Authorization: `Bearer ${accessToken}`, Accept: "application/json" };
 
-    if (!resp.ok) {
-      const body = await resp.text();
+    // uid format: "gb-nr:{serviceUid}:{YYYY-MM-DD}" (e.g. "gb-nr:P89167:2026-05-24")
+    // Try multiple URL formats in order - the RTT NG service endpoint URL is not documented
+    // and requires trial-and-error. Parse components first.
+    const uidParts = uid.split(':');
+    const serviceUid = uidParts.length >= 2 ? uidParts[1] : uid; // "P89167"
+    const dateStr = uidParts.length >= 3 ? uidParts[2] : null;   // "2026-05-24"
+    const dateParts = dateStr ? dateStr.split('-') : [];          // ["2026","05","24"]
+
+    const candidateUrls = [
+      // Option A: service uid + date as path segments (classic RTT format)
+      dateParts.length === 3
+        ? `https://data.rtt.io/rtt/service/${serviceUid}/${dateParts[0]}/${dateParts[1]}/${dateParts[2]}`
+        : null,
+      // Option B: service uid + date as single segment
+      dateStr ? `https://data.rtt.io/rtt/service/${serviceUid}/${dateStr}` : null,
+      // Option C: raw composite uid with colons (pchar are valid in URL path)
+      `https://data.rtt.io/rtt/service/${uid}`,
+      // Option D: service uid only
+      `https://data.rtt.io/rtt/service/${serviceUid}`,
+    ].filter(Boolean);
+
+    let resp = null;
+    let triedUrl = '';
+    for (const candidateUrl of candidateUrls) {
+      triedUrl = candidateUrl;
+      resp = await fetch(candidateUrl, { headers: rttHeaders });
+      if (resp.ok) break;
+      resp = null;
+    }
+
+    if (!resp) {
       return new Response(
-        JSON.stringify({ error: `RTT service error ${resp.status}`, detail: body }),
-        { status: resp.status, headers: { "Content-Type": "application/json" } }
+        JSON.stringify({ error: `RTT service error: no candidate URL succeeded`, triedUrls: candidateUrls }),
+        { status: 404, headers: { "Content-Type": "application/json" } }
       );
     }
 
