@@ -2252,28 +2252,12 @@ export default {
         const [yr, mo, dy] = date.split('-');
         const accessToken = await getRttAccessToken(env);
         const rttHeaders = { Authorization: `Bearer ${accessToken}`, Accept: "application/json" };
-        const candidates = [
-          // 400 endpoint - explore parameter variations
-          `https://data.rtt.io/rtt/service?identity=${identity}&date=${date}`,
-          `https://data.rtt.io/rtt/service?uid=${identity}&date=${date}`,
-          `https://data.rtt.io/rtt/service?code=gb-nr:${identity}&date=${date}`,
-          `https://data.rtt.io/rtt/service?uniqueIdentity=gb-nr:${identity}:${date}`,
-          `https://data.rtt.io/rtt/service?serviceUid=${identity}&date=${date}`,
-          `https://data.rtt.io/rtt/service?serviceUid=${identity}&departureDate=${date}`,
-          `https://data.rtt.io/rtt/service?identity=${identity}&departureDate=${date}`,
-          `https://data.rtt.io/rtt/service?code=gb-nr:${identity}&departureDate=${date}`,
-        ];
-        const results = {};
-        for (const c of candidates) {
-          try {
-            const r = await fetch(c, { headers: rttHeaders });
-            const body = await r.text();
-            results[c] = { status: r.status, body: body.slice(0, 300) };
-          } catch (e) {
-            results[c] = { status: 'error', body: e.message };
-          }
-        }
-        return new Response(JSON.stringify(results, null, 2), {
+        // Working URL format confirmed: ?uniqueIdentity=gb-nr:{identity}:{date}
+        const workingUrl = `https://data.rtt.io/rtt/service?uniqueIdentity=gb-nr:${identity}:${date}`;
+        const r = await fetch(workingUrl, { headers: rttHeaders });
+        const data = await r.json();
+        // Return the full response structure
+        return new Response(JSON.stringify({ status: r.status, url: workingUrl, data }, null, 2), {
           headers: { "Content-Type": "application/json" },
         });
       } catch (err) {
