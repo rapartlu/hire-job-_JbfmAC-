@@ -9,8 +9,8 @@
  */
 
 // Updated each deploy so the footer timestamp is always accurate.
-const DEPLOY_VERSION = 'v8';
-const DEPLOY_TIME = '23 May 2026, 16:30 UTC';
+const DEPLOY_VERSION = 'v9';
+const DEPLOY_TIME = '24 May 2026, 12:00 UTC';
 
 // UK stations with CRS codes - Greater London first, then nationwide.
 const STATIONS = [
@@ -555,7 +555,11 @@ async function handleService(request, env) {
 
   try {
     const accessToken = await getRttAccessToken(env);
-    const resp = await fetch(`https://data.rtt.io/rtt/service/${encodeURIComponent(uid)}`, {
+    // uid format: "gb-nr:{serviceUid}:{YYYY-MM-DD}"
+    // Colons are valid URL path characters (RFC 3986 pchar) but encodeURIComponent encodes
+    // them as %3A, which the RTT NG API does not recognise. Build the URL without encoding.
+    const serviceUrl = `https://data.rtt.io/rtt/service/${uid}`;
+    const resp = await fetch(serviceUrl, {
       headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
     });
 
