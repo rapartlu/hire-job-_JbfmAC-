@@ -2242,21 +2242,37 @@ export default {
       return handleStations();
     }
 
-    // Temporary debug: return raw RTT NG API response for a single service
-    // Usage: /api/debug-raw?from=LBG&time=1110
-    if (url.pathname === "/api/debug-raw") {
+    // Temporary debug: probe RTT NG API endpoints for service details
+    // Usage: /api/debug-probe?identity=P89023&date=2026-05-24
+    if (url.pathname === "/api/debug-probe") {
       if (!env.RTT_PORTAL_TOKEN) return new Response('no token', { status: 503 });
       try {
-        const fromCrs = url.searchParams.get('from') || 'LBG';
-        const time = url.searchParams.get('time') || null;
+        const identity = url.searchParams.get('identity') || 'P89023';
+        const date = url.searchParams.get('date') || '2026-05-24';
+        const [yr, mo, dy] = date.split('-');
         const accessToken = await getRttAccessToken(env);
-        const rawResp = await fetch(rttUrl(fromCrs, null, time), {
-          headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
-        });
-        const rawData = await rawResp.json();
-        // Return just the first service's raw data to see structure
-        const firstSvc = (rawData.services || [])[0] || {};
-        return new Response(JSON.stringify({ keys: Object.keys(firstSvc), firstSvc }, null, 2), {
+        const rttHeaders = { Authorization: `Bearer ${accessToken}`, Accept: "application/json" };
+        const candidates = [
+          `https://data.rtt.io/rtt/service/${identity}/${yr}/${mo}/${dy}`,
+          `https://data.rtt.io/rtt/service/${identity}/${date}`,
+          `https://data.rtt.io/rtt/service/${identity}`,
+          `https://data.rtt.io/rtt/services/${identity}/${yr}/${mo}/${dy}`,
+          `https://data.rtt.io/rtt/train/${identity}/${yr}/${mo}/${dy}`,
+          `https://data.rtt.io/rtt/journey/${identity}/${date}`,
+          `https://data.rtt.io/rtt/schedule/${identity}/${date}`,
+          `https://data.rtt.io/rtt/service?identity=${identity}&date=${date}`,
+          `https://data.rtt.io/api/service/${identity}/${yr}/${mo}/${dy}`,
+        ];
+        const results = {};
+        for (const c of candidates) {
+          try {
+            const r = await fetch(c, { headers: rttHeaders });
+            results[c] = r.status;
+          } catch (e) {
+            results[c] = `error: ${e.message}`;
+          }
+        }
+        return new Response(JSON.stringify(results, null, 2), {
           headers: { "Content-Type": "application/json" },
         });
       } catch (err) {
