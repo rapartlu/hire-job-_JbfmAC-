@@ -10,7 +10,7 @@
 
 // Updated each deploy so the footer timestamp is always accurate.
 const DEPLOY_VERSION = 'v9';
-const DEPLOY_TIME = '24 May 2026, 12:00 UTC';
+const DEPLOY_TIME = '24 May 2026, 12:20 UTC';
 
 // UK stations with CRS codes - Greater London first, then nationwide.
 const STATIONS = [
@@ -555,76 +555,54 @@ async function handleService(request, env) {
 
   try {
     const accessToken = await getRttAccessToken(env);
-    const rttHeaders = { Authorization: `Bearer ${accessToken}`, Accept: "application/json" };
+    // RTT NG service endpoint: GET /rtt/service?uniqueIdentity={uid}
+    // uid format is "gb-nr:{serviceUid}:{YYYY-MM-DD}" - passes as the uniqueIdentity param.
+    const resp = await fetch(
+      `https://data.rtt.io/rtt/service?uniqueIdentity=${encodeURIComponent(uid)}`,
+      { headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" } }
+    );
 
-    // uid format: "gb-nr:{serviceUid}:{YYYY-MM-DD}" (e.g. "gb-nr:P89167:2026-05-24")
-    // Try multiple URL formats in order - the RTT NG service endpoint URL is not documented
-    // and requires trial-and-error. Parse components first.
-    const uidParts = uid.split(':');
-    const serviceUid = uidParts.length >= 2 ? uidParts[1] : uid; // "P89167"
-    const dateStr = uidParts.length >= 3 ? uidParts[2] : null;   // "2026-05-24"
-    const dateParts = dateStr ? dateStr.split('-') : [];          // ["2026","05","24"]
-
-    const candidateUrls = [
-      // Option A: service uid + date as path segments (classic RTT format)
-      dateParts.length === 3
-        ? `https://data.rtt.io/rtt/service/${serviceUid}/${dateParts[0]}/${dateParts[1]}/${dateParts[2]}`
-        : null,
-      // Option B: service uid + date as single segment
-      dateStr ? `https://data.rtt.io/rtt/service/${serviceUid}/${dateStr}` : null,
-      // Option C: raw composite uid with colons (pchar are valid in URL path)
-      `https://data.rtt.io/rtt/service/${uid}`,
-      // Option D: service uid only
-      `https://data.rtt.io/rtt/service/${serviceUid}`,
-    ].filter(Boolean);
-
-    let resp = null;
-    let triedUrl = '';
-    for (const candidateUrl of candidateUrls) {
-      triedUrl = candidateUrl;
-      resp = await fetch(candidateUrl, { headers: rttHeaders });
-      if (resp.ok) break;
-      resp = null;
-    }
-
-    if (!resp) {
+    if (!resp.ok) {
+      const body = await resp.text();
       return new Response(
-        JSON.stringify({ error: `RTT service error: no candidate URL succeeded`, triedUrls: candidateUrls }),
-        { status: 404, headers: { "Content-Type": "application/json" } }
+        JSON.stringify({ error: `RTT service error ${resp.status}`, detail: body }),
+        { status: resp.status, headers: { "Content-Type": "application/json" } }
       );
     }
 
     const data = await resp.json();
 
-    // RTT NG service endpoint returns { locations: [...] }
-    // Each location has temporalData and location metadata.
-    const rawLocs = data.locations || [];
+    // RTT NG service endpoint returns { service: { locations: [...], ... } }
+    // Each location has temporalData (arrival/departure), locationMetadata (platform),
+    // and location (description, shortCodes[0]=CRS, longCodes[0]=TIPLOC).
+    const rawLocs = data.service?.locations || data.locations || [];
+    const fmtAny = v => {
+      if (!v) return null;
+      if (v.includes('T')) return fmtIsoTime(v);
+      return v; // already HH:MM
+    };
     const locations = rawLocs
-      .filter(loc => loc.isPublicCall !== false)
+      .filter(loc => loc.temporalData?.displayAs !== 'PASS')
       .map(loc => {
-        const fmtAny = v => {
-          if (!v) return null;
-          if (v.includes('T')) return fmtIsoTime(v);
-          return v; // already HH:MM
-        };
-        const name = loc.location?.description || loc.description || "";
-        const crs = loc.location?.crs || loc.crs || "";
+        const name = loc.location?.description || "";
+        const crs = loc.location?.shortCodes?.[0] || loc.location?.crs || "";
         const platform = loc.locationMetadata?.platform?.actual
           || loc.locationMetadata?.platform?.planned
-          || loc.platform || "--";
+          || "--";
+        const callType = loc.temporalData?.scheduledCallType || "";
         return {
           name,
           crs,
-          scheduledArr: fmtAny(loc.temporalData?.arrival?.scheduleAdvertised || loc.scheduledArrival),
+          scheduledArr: fmtAny(loc.temporalData?.arrival?.scheduleAdvertised),
           realtimeArr: fmtAny(loc.temporalData?.arrival?.realtimeForecast
-            || loc.temporalData?.arrival?.realtimeActual
-            || loc.realtimeArrival),
-          scheduledDep: fmtAny(loc.temporalData?.departure?.scheduleAdvertised || loc.scheduledDeparture),
-          realtimeDep: fmtAny(loc.temporalData?.departure?.realtimeForecast || loc.realtimeDeparture),
+            || loc.temporalData?.arrival?.realtimeActual),
+          scheduledDep: fmtAny(loc.temporalData?.departure?.scheduleAdvertised),
+          realtimeDep: fmtAny(loc.temporalData?.departure?.realtimeForecast
+            || loc.temporalData?.departure?.realtimeActual),
           platform,
-          isPass: loc.isPass || false,
-          isOrigin: loc.isOrigin || false,
-          isDestination: loc.isDestination || false,
+          isPass: false,
+          isOrigin: callType === 'ADVERTISED_PICK_UP',
+          isDestination: callType === 'ADVERTISED_SET_DOWN',
         };
       })
       .filter(loc => loc.name);
@@ -2240,29 +2218,6 @@ export default {
 
     if (url.pathname === "/api/stations") {
       return handleStations();
-    }
-
-    // Temporary debug: probe RTT NG API endpoints for service details
-    // Usage: /api/debug-probe?identity=P89023&date=2026-05-24
-    if (url.pathname === "/api/debug-probe") {
-      if (!env.RTT_PORTAL_TOKEN) return new Response('no token', { status: 503 });
-      try {
-        const identity = url.searchParams.get('identity') || 'P89023';
-        const date = url.searchParams.get('date') || '2026-05-24';
-        const [yr, mo, dy] = date.split('-');
-        const accessToken = await getRttAccessToken(env);
-        const rttHeaders = { Authorization: `Bearer ${accessToken}`, Accept: "application/json" };
-        // Working URL format confirmed: ?uniqueIdentity=gb-nr:{identity}:{date}
-        const workingUrl = `https://data.rtt.io/rtt/service?uniqueIdentity=gb-nr:${identity}:${date}`;
-        const r = await fetch(workingUrl, { headers: rttHeaders });
-        const data = await r.json();
-        // Return the full response structure
-        return new Response(JSON.stringify({ status: r.status, url: workingUrl, data }, null, 2), {
-          headers: { "Content-Type": "application/json" },
-        });
-      } catch (err) {
-        return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: { "Content-Type": "application/json" } });
-      }
     }
 
     return handleHtml();
