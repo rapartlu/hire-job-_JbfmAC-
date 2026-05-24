@@ -2242,6 +2242,28 @@ export default {
       return handleStations();
     }
 
+    // Temporary debug: return raw RTT NG API response for a single service
+    // Usage: /api/debug-raw?from=LBG&time=1110
+    if (url.pathname === "/api/debug-raw") {
+      if (!env.RTT_PORTAL_TOKEN) return new Response('no token', { status: 503 });
+      try {
+        const fromCrs = url.searchParams.get('from') || 'LBG';
+        const time = url.searchParams.get('time') || null;
+        const accessToken = await getRttAccessToken(env);
+        const rawResp = await fetch(rttUrl(fromCrs, null, time), {
+          headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+        });
+        const rawData = await rawResp.json();
+        // Return just the first service's raw data to see structure
+        const firstSvc = (rawData.services || [])[0] || {};
+        return new Response(JSON.stringify({ keys: Object.keys(firstSvc), firstSvc }, null, 2), {
+          headers: { "Content-Type": "application/json" },
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: { "Content-Type": "application/json" } });
+      }
+    }
+
     return handleHtml();
   },
 };
