@@ -2253,23 +2253,24 @@ export default {
         const accessToken = await getRttAccessToken(env);
         const rttHeaders = { Authorization: `Bearer ${accessToken}`, Accept: "application/json" };
         const candidates = [
-          `https://data.rtt.io/rtt/service/${identity}/${yr}/${mo}/${dy}`,
-          `https://data.rtt.io/rtt/service/${identity}/${date}`,
-          `https://data.rtt.io/rtt/service/${identity}`,
-          `https://data.rtt.io/rtt/services/${identity}/${yr}/${mo}/${dy}`,
-          `https://data.rtt.io/rtt/train/${identity}/${yr}/${mo}/${dy}`,
-          `https://data.rtt.io/rtt/journey/${identity}/${date}`,
-          `https://data.rtt.io/rtt/schedule/${identity}/${date}`,
+          // 400 endpoint - explore parameter variations
           `https://data.rtt.io/rtt/service?identity=${identity}&date=${date}`,
-          `https://data.rtt.io/api/service/${identity}/${yr}/${mo}/${dy}`,
+          `https://data.rtt.io/rtt/service?uid=${identity}&date=${date}`,
+          `https://data.rtt.io/rtt/service?code=gb-nr:${identity}&date=${date}`,
+          `https://data.rtt.io/rtt/service?uniqueIdentity=gb-nr:${identity}:${date}`,
+          `https://data.rtt.io/rtt/service?serviceUid=${identity}&date=${date}`,
+          `https://data.rtt.io/rtt/service?serviceUid=${identity}&departureDate=${date}`,
+          `https://data.rtt.io/rtt/service?identity=${identity}&departureDate=${date}`,
+          `https://data.rtt.io/rtt/service?code=gb-nr:${identity}&departureDate=${date}`,
         ];
         const results = {};
         for (const c of candidates) {
           try {
             const r = await fetch(c, { headers: rttHeaders });
-            results[c] = r.status;
+            const body = await r.text();
+            results[c] = { status: r.status, body: body.slice(0, 300) };
           } catch (e) {
-            results[c] = `error: ${e.message}`;
+            results[c] = { status: 'error', body: e.message };
           }
         }
         return new Response(JSON.stringify(results, null, 2), {
