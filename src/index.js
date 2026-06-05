@@ -467,8 +467,13 @@ async function handleApi(request, env) {
         const uid = s.scheduleMetadata?.uniqueIdentity;
         if (!uid || seenUids.has(uid)) continue;
         if (arrByUid[uid]) {
+          const mapped = mapServiceWithArr(s, arrByUid[uid]);
+          // Filter direction mismatches: a service running THROUGH 'to' en route towards 'from'
+          // has the same UID on both boards but in opposite directions. When arr < dep the
+          // duration wraps negative, durationMins returns null (>480 cap). Skip those.
+          if (mapped.scheduledArr && mapped.durationMins === null) continue;
           seenUids.add(uid);
-          merged.push(mapServiceWithArr(s, arrByUid[uid]));
+          merged.push(mapped);
         }
       }
 
