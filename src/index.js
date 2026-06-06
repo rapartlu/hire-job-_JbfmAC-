@@ -9,8 +9,13 @@
  */
 
 // Updated each deploy so the footer timestamp is always accurate.
-const DEPLOY_VERSION = 'v9';
-const DEPLOY_TIME = '24 May 2026, 12:20 UTC';
+const DEPLOY_VERSION = 'v10';
+const DEPLOY_TIME = '5 Jun 2026, 18:30 UTC';
+
+// Module-level token cache. Reused within a Worker instance's lifetime (seconds to minutes).
+// Reduces get_access_token calls when multiple API requests arrive close together.
+let _tokenCache = null;
+let _tokenExpiry = 0;
 
 // UK stations with CRS codes - Greater London first, then nationwide.
 const STATIONS = [
@@ -295,8 +300,13 @@ function rttUrl(from, to, time, type) {
   return `https://data.rtt.io/rtt/location?${params}`;
 }
 
-// Exchange long-lived portal JWT for a short-lived access token (~20 min TTL)
+// Exchange long-lived portal JWT for a short-lived access token (~20 min TTL).
+// Caches the token in module state to reduce auth round-trips on burst requests.
 async function getRttAccessToken(env) {
+  const now = Date.now();
+  if (_tokenCache && _tokenExpiry > now + 60000) {
+    return _tokenCache;
+  }
   const tokenResp = await fetch("https://data.rtt.io/api/get_access_token", {
     method: "POST",
     headers: {
@@ -309,6 +319,9 @@ async function getRttAccessToken(env) {
     throw new Error(`RTT auth failed (${tokenResp.status}): ${body}`);
   }
   const { token } = await tokenResp.json();
+  // Cache for 18 minutes (token TTL is ~20 min, expire 2 min early to be safe)
+  _tokenCache = token;
+  _tokenExpiry = now + 18 * 60 * 1000;
   return token;
 }
 
@@ -403,9 +416,25 @@ async function handleApi(request, env) {
     const rttHeaders = { Authorization: `Bearer ${accessToken}`, Accept: "application/json" };
 
     if (to) {
-      const [depsResp, arrsResp] = await Promise.all([
+      // Two-pronged approach to catch all services:
+      //
+      // Prong 1 (through-services): departures from 'from' + arrivals at 'to', cross-referenced
+      //   by UID. RTT filterTo misses trains whose terminus is beyond 'to' (e.g. a London Bridge
+      //   → Tunbridge Wells service that stops at Orpington en route). The arrivals board at 'to'
+      //   includes those through-trains so the UID cross-reference catches them.
+      //
+      // Prong 2 (terminus services / long routes): departures from 'from' with filterTo=to.
+      //   Prong 1 fails for long-distance routes (e.g. LBG→Brighton) because the arrivals board
+      //   at Brighton at time T shows trains ALREADY arriving (i.e. trains that LEFT London 60+
+      //   minutes ago), which never overlap with the departures board at time T.
+      //   filterTo directly returns trains from 'from' calling at 'to' with correct arrival times.
+      //
+      // Result: merge both, deduplicate by UID, preferring Prong 1 for accurate through-service
+      // arrival times from the arrivals board.
+      const [depsResp, arrsResp, directResp] = await Promise.all([
         fetch(rttUrl(from, null, time), { headers: rttHeaders }),
         fetch(rttUrl(to, null, time, 'arrivals'), { headers: rttHeaders }),
+        fetch(rttUrl(from, to, time), { headers: rttHeaders }),
       ]);
 
       if (!depsResp.ok) {
@@ -418,25 +447,50 @@ async function handleApi(request, env) {
 
       const depsData = await depsResp.json();
       const arrsData = arrsResp.ok ? await arrsResp.json() : { services: [] };
+      const directData = directResp.ok ? await directResp.json() : { services: [] };
       const depServices = depsData.services || [];
       const arrServices = arrsData.services || [];
+      const directServices = directData.services || [];
 
+      // Build arrivals lookup: uid → arrival-board service
       const arrByUid = {};
       for (const s of arrServices) {
         const uid = s.scheduleMetadata?.uniqueIdentity;
         if (uid) arrByUid[uid] = s;
       }
 
-      const matched = depServices.filter(s => {
+      const seenUids = new Set();
+      const merged = [];
+
+      // Prong 1: through-services caught by dual-board cross-reference
+      for (const s of depServices) {
         const uid = s.scheduleMetadata?.uniqueIdentity;
-        return uid && arrByUid[uid];
+        if (!uid || seenUids.has(uid)) continue;
+        if (arrByUid[uid]) {
+          seenUids.add(uid);
+          merged.push(mapServiceWithArr(s, arrByUid[uid]));
+        }
+      }
+
+      // Prong 2: terminus/long-distance services from filterTo not caught above
+      for (const s of directServices) {
+        const uid = s.scheduleMetadata?.uniqueIdentity;
+        if (!uid || seenUids.has(uid)) continue;
+        const svcMapped = mapService(s);
+        // Skip terminus arrivals (no departure time = train ends here)
+        if (!svcMapped.scheduledDep) continue;
+        seenUids.add(uid);
+        merged.push(svcMapped);
+      }
+
+      // Sort by scheduled departure time ascending
+      merged.sort((a, b) => {
+        if (!a.scheduledDep) return 1;
+        if (!b.scheduledDep) return -1;
+        return a.scheduledDep.localeCompare(b.scheduledDep);
       });
 
-      const services = matched.slice(0, 10).map(s => {
-        const uid = s.scheduleMetadata?.uniqueIdentity;
-        return mapServiceWithArr(s, arrByUid[uid]);
-      });
-
+      const services = merged.slice(0, 10);
       const lastDep = services.length > 0 ? services[services.length - 1].scheduledDep : null;
 
       return new Response(
@@ -1711,7 +1765,7 @@ function handleHtml() {
 
     tr.innerHTML = \`
       <td>
-        <div class="dep-time">\${s.scheduledDep}</div>
+        <div class="dep-time">\${s.scheduledDep || '--'}</div>
         \${depStatus.html}
         \${expandHint}
         <span class="stop-count-badge" style="display:none"></span>
