@@ -9,8 +9,8 @@
  */
 
 // Updated each deploy so the footer timestamp is always accurate.
-const DEPLOY_VERSION = 'v10';
-const DEPLOY_TIME = '5 Jun 2026, 18:30 UTC';
+const DEPLOY_VERSION = 'v11';
+const DEPLOY_TIME = '20 Jun 2026, 18:00 UTC';
 
 // Module-level token cache. Reused within a Worker instance's lifetime (seconds to minutes).
 // Reduces get_access_token calls when multiple API requests arrive close together.
@@ -2018,7 +2018,17 @@ function handleHtml() {
   async function fetchSavedTimes(from, to, timeFrom) {
     try {
       const params = new URLSearchParams({ from, to });
-      if (timeFrom) params.set('time', timeFrom);
+      // Always send an explicit timeFrom so RTT doesn't start from midnight.
+      // Without it, by mid-afternoon the first 10 trains on the departures board
+      // are old midnight trains that don't overlap the arrivals board, giving 0 results.
+      if (timeFrom) {
+        params.set('time', timeFrom);
+      } else {
+        const now = new Date();
+        const hh = String(now.getHours()).padStart(2, '0');
+        const mm = String(now.getMinutes()).padStart(2, '0');
+        params.set('time', \`\${hh}\${mm}\`);
+      }
       const resp = await fetch(\`/api/trains?\${params}\`);
       if (!resp.ok) return null;
       const data = await resp.json();
@@ -2215,10 +2225,15 @@ function handleHtml() {
       btn.addEventListener('click', () => removeJourney(btn.dataset.id));
     });
 
-    const results = await Promise.all(journeys.map(async j => ({
-      data: await fetchSavedTimes(j.from, j.to),
-      last: await fetchLastTrain(j.from, j.to),
-    })));
+    // Run fetchSavedTimes and fetchLastTrain concurrently per journey (not sequentially)
+    // so the panel doesn't have to wait for the last-train lookups before showing times.
+    const results = await Promise.all(journeys.map(async j => {
+      const [data, last] = await Promise.all([
+        fetchSavedTimes(j.from, j.to),
+        fetchLastTrain(j.from, j.to),
+      ]);
+      return { data, last };
+    }));
 
     const now = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
     note.textContent = \`Updated \${now}\`;
