@@ -9,8 +9,8 @@
  */
 
 // Updated each deploy so the footer timestamp is always accurate.
-const DEPLOY_VERSION = 'v10';
-const DEPLOY_TIME = '5 Jun 2026, 18:30 UTC';
+const DEPLOY_VERSION = 'v11';
+const DEPLOY_TIME = '20 Jun 2026, 18:05 UTC';
 
 // Module-level token cache. Reused within a Worker instance's lifetime (seconds to minutes).
 // Reduces get_access_token calls when multiple API requests arrive close together.
