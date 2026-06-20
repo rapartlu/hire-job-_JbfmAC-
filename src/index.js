@@ -1526,6 +1526,19 @@ function handleHtml() {
   updateClock();
   setInterval(updateClock, 10000);
 
+  // ── Delay helper (browser scope) ────────────────────────────────────────────
+  // Mirrors the server-side isDelayed. The saved-trip chips (renderChip) and the
+  // calling-points expansion call isDelayed in the browser; without this
+  // definition every saved-times render threw ReferenceError, so saved trips
+  // showed nothing until the user ran a manual Search (which uses a different
+  // renderer that does not call isDelayed). See #1809 iterations 9-11.
+  function isDelayed(sched, actual) {
+    if (!sched || !actual || sched === actual) return false;
+    const s = parseInt(sched.replace(':', ''), 10);
+    const a = parseInt(actual.replace(':', ''), 10);
+    return a > s;
+  }
+
   // ── Date/time defaults ────────────────────────────────────────────────────
   function setNow() {
     const now = new Date();
